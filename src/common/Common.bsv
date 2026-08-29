@@ -12,7 +12,8 @@ package Common;
 
   typedef enum {
     ALU_ADD, ALU_SUB, ALU_AND, ALU_OR,
-    ALU_BEQ, ALU_BNE, ALU_BLT, ALU_BGE
+    ALU_BEQ, ALU_BNE, ALU_BLT, ALU_BGE,
+    ALU_LW, ALU_SW
   } ALUOp deriving (Bits, Eq, FShow);
 
   typedef struct {
@@ -28,6 +29,7 @@ package Common;
 
   typedef struct {
     Decoded instr;
+    Bit#(32) pc;
     PhysRegTag src1Tag;
     Bool src1Ready;
     PhysRegTag src2Tag;
@@ -68,8 +70,7 @@ package Common;
   function Decoded decode(Instruction instr, Bit#(32) pc);
     Bit#(7) actualOpcode = instr[6:0];
     Bit#(3) funct3 = instr[14:12];
-    
-    // Determine instruction class and ALUOp
+
     ALUOp aluOp;
     if (actualOpcode == 7'b0110011) begin  // R-type
       if (funct3 == 3'b000) aluOp = ALU_ADD;      // ADD/SUB
@@ -78,6 +79,10 @@ package Common;
       else aluOp = ALU_ADD;
     end else if (actualOpcode == 7'b0010011) begin  // I-type (ADDI, etc.)
       aluOp = ALU_ADD;
+    end else if (actualOpcode == 7'b0000011) begin  // LOAD (LW)
+      aluOp = ALU_LW;
+    end else if (actualOpcode == 7'b0100011) begin  // STORE (SW)
+      aluOp = ALU_SW;
     end else if (actualOpcode == 7'b1100011) begin  // Branch (B-type)
       if (funct3 == 3'b000) aluOp = ALU_BEQ;
       else if (funct3 == 3'b001) aluOp = ALU_BNE;
@@ -88,13 +93,20 @@ package Common;
       aluOp = ALU_ADD;  // Default
     end
     
-    // Extract immediates based on instruction type
     Bit#(32) imm = 0;
     RegIndex rs2Field = 0;
     
-    if (actualOpcode == 7'b0010011) begin  // I-type immediate
+    if (actualOpcode == 7'b0010011) begin  // I-type immediate (ADDI, etc)
       imm = signExtend(instr[31:20]);
       rs2Field = 0; 
+    end else if (actualOpcode == 7'b0000011) begin  // LOAD (LW) - I-type
+      imm = signExtend(instr[31:20]);
+      rs2Field = 0;
+    end else if (actualOpcode == 7'b0100011) begin  // STORE (SW) - S-type
+      Bit#(7) imm_hi = instr[31:25];
+      Bit#(5) imm_lo = instr[11:7];
+      imm = signExtend({imm_hi, imm_lo});
+      rs2Field = instr[24:20];
     end else if (actualOpcode == 7'b1100011) begin  // B-type immediate
       Bit#(1) bit12 = instr[31];
       Bit#(6) bits10_5 = instr[30:25];
@@ -158,6 +170,18 @@ package Common;
     Int#(32) sa = unpack(a);
     Int#(32) sb = unpack(b);
     return sa >= sb;
+  endfunction
+
+  function Bool isMemoryOp(ALUOp op);
+    return (op == ALU_LW || op == ALU_SW);
+  endfunction
+  
+  function Bool isLoadOp(ALUOp op);
+    return (op == ALU_LW);
+  endfunction
+  
+  function Bool isStoreOp(ALUOp op);
+    return (op == ALU_SW);
   endfunction
 
   typedef struct {

@@ -5,36 +5,38 @@ import FIFO::*;
 import FIFOF::*;
 import SpecialFIFOs::*;
 import Common::*;
-import FreeList::*;
+import RenameStage::*;
 
-typedef 32 NumEntries;
+typedef 64 NumEntries;
 
 typedef struct {
   ROBTag tag;
   Maybe#(RegIndex) dst;
   Maybe#(PhysRegTag) physDst;
-  Maybe#(PhysRegTag) oldPhysDst;  // Physical register being replaced
+  Maybe#(PhysRegTag) oldPhysDst;  
   Bool completed;
   Data data;
+  Bool isStore; 
 } ROBEntry deriving (Bits, FShow);
 
 interface ROB_IFC;
   method Bool canAllocate();
   method Bool isEmpty();
-  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst);
+  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted);
   method Action writeResult(ROBTag tag, Data data);
   method Action markCompleted(ROBTag tag);
-  method Action writeResultAndComplete(ROBTag tag, Data data);
+  method Action writeResultAndMark(ROBTag tag, Data data);
   method Maybe#(Tuple2#(ROBTag, ROBEntry)) peekHead();
-  method Action commitHead(FreeList_IFC freeList);
+  method Action commitHead(RenameStage_IFC rename);
 endinterface
 
 module mkROB(ROB_IFC);
 
   Vector#(NumEntries, Reg#(ROBEntry)) robEntries <- replicateM(mkRegU);
+  Vector#(NumEntries, Reg#(Bool)) completionFlags <- replicateM(mkReg(False));
   Reg#(UInt#(6)) head <- mkReg(0);
   Reg#(UInt#(6)) tail <- mkReg(0);
-  Reg#(UInt#(6)) count <- mkReg(0); // 6 bits to count up to 32
+  Reg#(UInt#(7)) count <- mkReg(0); 
 
   function ROBTag mkTag(UInt#(6) idx);
     return ROBTag { idx: idx };
@@ -48,7 +50,7 @@ module mkROB(ROB_IFC);
     return (count == 0);
   endmethod
 
-  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst);
+  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted);
     if (!(count < fromInteger(valueOf(NumEntries))))
       $fatal(1, "ROB full!");
 
@@ -58,10 +60,12 @@ module mkROB(ROB_IFC);
       dst: dst,
       physDst: physDst,
       oldPhysDst: oldPhysDst,
-      completed: False,
-      data: unpack(0)
+      completed: False,  
+      data: unpack(0),
+      isStore: isStore
     };
-    tail <= (tail + 1 == fromInteger(valueOf(NumEntries))) ? 0 : tail + 1;
+    completionFlags[tail] <= startCompleted;
+    tail <= tail + 1;
     count <= count + 1;
     return tag;
   endmethod
@@ -71,37 +75,42 @@ module mkROB(ROB_IFC);
   endmethod
 
   method Action markCompleted(ROBTag tag);
-    robEntries[tag.idx].completed <= True;
+    completionFlags[tag.idx] <= True;
   endmethod
 
-  method Action writeResultAndComplete(ROBTag tag, Data data);
-    robEntries[tag.idx] <= ROBEntry {
-      tag: robEntries[tag.idx].tag,
-      dst: robEntries[tag.idx].dst,
-      physDst: robEntries[tag.idx].physDst,
-      oldPhysDst: robEntries[tag.idx].oldPhysDst,
-      completed: True,
-      data: data
-    };
+  method Action writeResultAndMark(ROBTag tag, Data data);
+    robEntries[tag.idx].data <= data;
+    completionFlags[tag.idx] <= True;
   endmethod
 
   method Maybe#(Tuple2#(ROBTag, ROBEntry)) peekHead();
     Maybe#(Tuple2#(ROBTag, ROBEntry)) result = tagged Invalid;
-    if (count > 0)
-      result = tagged Valid tuple2(robEntries[head].tag, robEntries[head]);
+    if (count > 0) begin
+      let entry = robEntries[head];
+      let completedEntry = ROBEntry {
+        tag: entry.tag,
+        dst: entry.dst,
+        physDst: entry.physDst,
+        oldPhysDst: entry.oldPhysDst,
+        completed: completionFlags[head],
+        data: entry.data,
+        isStore: entry.isStore
+      };
+      result = tagged Valid tuple2(entry.tag, completedEntry);
+    end
     return result;
   endmethod
 
-  method Action commitHead(FreeList_IFC freeList);
-    if (count > 0 && robEntries[head].completed) begin
+  method Action commitHead(RenameStage_IFC rename);
+    if (count > 0 && completionFlags[head]) begin
       if (robEntries[head].oldPhysDst matches tagged Valid .oldPhysReg) begin
-        freeList.free(oldPhysReg);
+        rename.freeReg(oldPhysReg);
         $display("[ROB] Committing ROB[%0d]: freed old physical register p%0d", head, oldPhysReg);
       end else begin
         $display("[ROB] Committing ROB[%0d]: no old physical register to free", head);
       end
       
-      head <= (head + 1 == fromInteger(valueOf(NumEntries))) ? 0 : head + 1;
+      head <= head + 1;
       count <= count - 1;
     end
   endmethod

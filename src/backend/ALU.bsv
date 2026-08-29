@@ -37,30 +37,11 @@ package ALU;
 
   module mkALU(ALU_IFC);
 
-    FIFOF#(ALUReq) reqQ <- mkFIFOF();
-    FIFOF#(ALUReq) stage1Q <- mkFIFOF();
-    FIFOF#(ALUReq) stage2Q <- mkFIFOF();
-    FIFOF#(ALUReq) stage3Q <- mkFIFOF();
-    FIFOF#(ALUReq) stage4Q <- mkFIFOF();
-    FIFOF#(ALUReq) stage5Q <- mkFIFOF();
-    FIFOF#(ALUReq) stage6Q <- mkFIFOF();
-    FIFOF#(ALUReq) stage7Q <- mkFIFOF();
-    FIFOF#(ALUReq) stage8Q <- mkFIFOF();
-    FIFOF#(ALUResp) stage9Q <- mkFIFOF();
-    FIFOF#(ALUResp) respQ <- mkFIFOF();
+    FIFOF#(ALUReq) reqQ <- mkFIFOF();  // Input buffer
+    FIFOF#(ALUResp) respQ <- mkFIFOF();  // Output buffer
 
-    rule s1; let r = reqQ.first; reqQ.deq; stage1Q.enq(r); endrule
-    rule s2; let r = stage1Q.first; stage1Q.deq; stage2Q.enq(r); endrule
-    rule s3; let r = stage2Q.first; stage2Q.deq; stage3Q.enq(r); endrule
-    rule s4; let r = stage3Q.first; stage3Q.deq; stage4Q.enq(r); endrule
-    rule s5; let r = stage4Q.first; stage4Q.deq; stage5Q.enq(r); endrule
-    rule s6; let r = stage5Q.first; stage5Q.deq; stage6Q.enq(r); endrule  
-    rule s7; let r = stage6Q.first; stage6Q.deq; stage7Q.enq(r); endrule
-    rule s8; let r = stage7Q.first; stage7Q.deq; stage8Q.enq(r); endrule
-
-    // Stage 9: Execute
-    rule stage_execute;
-      let r = stage8Q.first; stage8Q.deq;
+    rule execute;
+      let r = reqQ.first; reqQ.deq;
 
       Data res = 32'd0;
       Bool isBranch = False;
@@ -107,12 +88,6 @@ package ALU;
         actualTaken: actualTaken,
         actualTarget: actualTarget
       };
-      stage9Q.enq(out);
-    endrule
-
-    // Stage 10: Writeback
-    rule stage_writeback;
-      let out = stage9Q.first; stage9Q.deq;
       respQ.enq(out);
     endrule
 

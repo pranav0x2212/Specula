@@ -1,13 +1,11 @@
 # Specula
 
-## 1. What is Specula?
-
 Specula is an experimental 1-wide out-of-order RISC-V processor core written in
 Bluespec SystemVerilog. It fetches a small program, renames registers, issues
 instructions out of order through a reservation station, and commits them in
 program order using a reorder buffer. It runs in the Bluespec simulator.
 
-## 2. How to run
+## How to run
 
 ```sh
 git clone https://github.com/pranav0x2212/Specula.git
@@ -47,7 +45,7 @@ younger independent instructions execute before the older dependency chain
 finishes, while the reorder buffer still commits all instructions in program
 order.
 
-## 3. Repository layout
+## Repository layout
 
 ```
 Makefile                        build rules

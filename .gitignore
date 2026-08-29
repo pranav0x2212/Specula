@@ -34,3 +34,6 @@ bsc.dir/
 *.bi
 *.bf
 *.ba.debugoutput.txt
+
+# Simulation output
+output.txt

@@ -49,20 +49,14 @@ package Common;
 
   function Instruction getInstruction(Bit#(32) pc);
     case(pc)
-      // Out-of-order execution test:
-      // Inst 1: addi x1, x0, 5      (no deps, executes first)
-      // Inst 2: add  x2, x1, x1     (depends on x1, BLOCKED)
-      // Inst 3: addi x3, x0, 10     (no deps, can OVERTAKE inst 2!)
-      // Inst 4: addi x4, x0, 15     (no deps, can OVERTAKE inst 2!)
-      32'h00000000: return 32'h00500093; // addi x1, x0, 5
-      32'h00000004: return 32'h00108133; // add  x2, x1, x1
-      32'h00000008: return 32'h00208463; // beq x1, x2, 8 (PC + 8, jump to 0x10)
-      32'h0000000c: return 32'h00a00193; // addi x3, x0, 10
-      32'h00000010: return 32'h00f00213; // addi x4, x0, 15
-      32'h00000014: return 32'h00000013; // nop
-      32'h00000018: return 32'h00000013; // nop
-      32'h0000001C: return 32'h00000013; // nop
-      32'h00000020: return 32'h00000013; // nop
+      32'h00000000: return 32'h00100093; // addi x1,  x0, 1     rob0  (seed, ready)
+      32'h00000004: return 32'h00108133; // add  x2,  x1, x1    rob1  needs x1
+      32'h00000008: return 32'h002101B3; // add  x3,  x2, x2    rob2  needs x2  (blocked)
+      32'h0000000c: return 32'h00318233; // add  x4,  x3, x3    rob3  needs x3  (oldest blocked)
+      32'h00000010: return 32'h00A00513; // addi x10, x0, 10    rob4  independent (ready)
+      32'h00000014: return 32'h00B00593; // addi x11, x0, 11    rob5  independent (ready)
+      32'h00000018: return 32'h00C00613; // addi x12, x0, 12    rob6  independent (ready)
+      32'h0000001c: return 32'h00D00693; // addi x13, x0, 13    rob7  independent (ready)
       default: return 32'h00000013; // nop (addi x0, x0, 0)
     endcase
   endfunction

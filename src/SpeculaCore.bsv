@@ -31,13 +31,10 @@ package SpeculaCore;
     Reg#(Bool) flushPending <- mkReg(False);
     Reg#(UInt#(32)) cycleCount <- mkReg(0);
 
-    Vector#(32, Reg#(BranchMetadata)) branchMeta <- replicateM(mkReg(BranchMetadata {
-      isBranch: False,
-      pc: 0,
-      predictedTarget: 0
-    }));
-
-    FIFOF#(BranchMetadata) branchMetaQ <- mkFIFOF();
+    Array#(Reg#(Bit#(32))) brPredNextPC  <- mkCReg(2, 0);   
+    Array#(Reg#(Bool))  brOutstanding    <- mkCReg(2, False); 
+    Reg#(Bit#(32))      recoverPC        <- mkReg(0);      
+    Reg#(Bool)          recoveryComplete <- mkReg(False); 
 
     FIFOF#(Tuple2#(Bit#(32), Instruction)) fetchedQ <- mkFIFOF();
     FIFOF#(Tuple2#(Bit#(32), Decoded))     decodedQ <- mkFIFOF();
@@ -45,9 +42,19 @@ package SpeculaCore;
 
     rule doFetch (!halted && !flushPending && pc < maxPC);
       let instr = getInstruction(pc);
-      fetch.start(pc);                     
+      let pr <- bp.predict(pc);
+      Bool predTaken = pr.prediction && pr.isValid;
+      Bit#(32) predNext = predTaken ? pr.targetAddr : (pc + 4);
+
+      if (instr[6:0] == 7'b1100011) begin
+        brPredNextPC[1] <= predNext;
+        $display("[FETCH] branch @ %h : predicted %s, predicted-next PC = %h",
+                 pc, predTaken ? "TAKEN" : "not-taken", predNext);
+      end
+
+      fetch.start(pc);
       fetchedQ.enq(tuple2(pc, instr));
-      pc <= pc + 4;                        
+      pc <= predNext;
     endrule
 
     rule doDecode (!flushPending);
@@ -74,20 +81,34 @@ package SpeculaCore;
       $display("[DISPATCH] Enqueued to buffer: rd=x%0d opcode=%0d", d.rd, d.opcode);
     endrule
 
-    rule doFlushQueue (flushPending && renamedInstrQ.notEmpty);
-      $display("[FLUSH] Draining stale instruction from queue");
-      renamedInstrQ.deq;
+    rule doRecover (flushPending && !recoveryComplete);
+      $display("[RECOVER] misprediction: flushing backend, restoring rename state, redirect PC -> %h", recoverPC);
+      rob.flushAll;
+      rs.flush;
+      alu.flush;
+      fetchedQ.clear;
+      decodedQ.clear;
+      renamedInstrQ.clear;
+      rename.restoreCheckpoint;
+      bp.flushHistory;
+      pc <= recoverPC;
+      halted <= False;
+      brOutstanding[1] <= False;
+      recoveryComplete <= True;
     endrule
 
-    rule doClearFlush (flushPending && !renamedInstrQ.notEmpty);
-      $display("[FLUSH] Queue drained, pipeline clean");
+    rule doRecoverDone (flushPending && recoveryComplete && !alu.busy);
+      $display("[RECOVER] backend clean, resuming fetch at %h", recoverPC);
       flushPending <= False;
+      recoveryComplete <= False;
     endrule
 
-    (* descending_urgency = "doDispatch, doCommit" *)
+    (* descending_urgency = "doRecover, doWriteback" *)
+    (* descending_urgency = "doRecover, doDispatch, doCommit" *)
     rule doDispatch (renamedInstrQ.notEmpty && !flushPending
                      && rob.canAllocate
-                     && (isMemoryOp(renamedInstrQ.first.instr.opcode) || rs.notFull));
+                     && (isMemoryOp(renamedInstrQ.first.instr.opcode) || rs.notFull)
+                     && !(isBranchOp(renamedInstrQ.first.instr.opcode) && brOutstanding[0]));
       let r = renamedInstrQ.first;
       Bool isMemoryOp = (r.instr.opcode == ALU_LW) || (r.instr.opcode == ALU_SW);
       Bool isLoad = (r.instr.opcode == ALU_LW);
@@ -119,14 +140,14 @@ package SpeculaCore;
           end
           
           if (isLoad) begin
-            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd != 0 ? tagged Valid destTag : tagged Invalid), oldPhysDst, False, True);
+            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd != 0 ? tagged Valid destTag : tagged Invalid), oldPhysDst, False, True, False);
 
             Data loadData <- lsu.load(addrValue);
             prf.write(destTag, loadData);
             prf.markReady(destTag);
             $display("[LSU] Load from addr %h -> p%0d = %h, rob=%0d", addrValue, destTag, loadData, robTag.idx);
           end else begin
-            let robTag <- rob.allocate(tagged Valid r.instr.rd, tagged Invalid, oldPhysDst, True, True);
+            let robTag <- rob.allocate(tagged Valid r.instr.rd, tagged Invalid, oldPhysDst, True, True, False);
             
             PhysRegTag dataRegTag = rename.lookupMapping(r.instr.rs2);
             Maybe#(Data) maybeStoreVal = prf.read(dataRegTag);
@@ -145,16 +166,28 @@ package SpeculaCore;
           
           if (r.instr.rd == 0 || success) begin
             renamedInstrQ.deq;
-            
-            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd == 0 ? tagged Invalid : tagged Valid destTag), oldPhysDst, False, False);
+
+            Bool isBr = isBranchOp(r.instr.opcode);
+
+            if (r.instr.rd != 0)
+              prf.clear(destTag);
+
+            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd == 0 ? tagged Invalid : tagged Valid destTag), oldPhysDst, False, False, isBr);
+
+            if (isBr) begin
+              rename.checkpoint();
+              brOutstanding[0] <= True;
+              $display("[DISPATCH] branch rob=%0d : rename + free-list checkpoint taken", robTag.idx);
+            end
+
             PhysRegTag src1PhysReg = rename.lookupMapping(r.instr.rs1);
             PhysRegTag src2PhysReg = rename.lookupMapping(r.instr.rs2);
             Bool src1Ready = prf.isReady(src1PhysReg);
             Bool src2Ready = prf.isReady(src2PhysReg);
-            
+
             Bit#(7) actualOpcode = r.instr.raw[6:0];
-            Bool shouldUseImm = (actualOpcode == 7'b0010011) || (actualOpcode == 7'b1100011);
-            
+            Bool shouldUseImm = (actualOpcode == 7'b0010011);  // ADDI only; branches compare rs1/rs2
+
             let rsEntry = RSEntry {
               opcode: r.instr.opcode,
               src1: src1PhysReg,
@@ -181,7 +214,7 @@ package SpeculaCore;
       cycleCount <= cycleCount + 1;
     endrule
 
-    rule doHalt (!halted && ((pc >= maxPC
+    rule doHalt (!halted && !flushPending && ((pc >= maxPC
                               && !fetchedQ.notEmpty && !decodedQ.notEmpty
                               && !renamedInstrQ.notEmpty)
                              || cycleCount > 100000000));
@@ -192,27 +225,35 @@ package SpeculaCore;
       halted <= True;
     endrule
 
-    rule doTerminate (halted && !rs.notEmpty && !alu.notEmpty && rob.isEmpty());
+    rule doTerminate (halted && !flushPending && !rs.notEmpty && !alu.notEmpty && rob.isEmpty());
       $display("[Specula] Simulation complete - all instructions retired");
       $finish();
     endrule
 
-    rule doCommit;
+    rule doCommit (!flushPending);
       let maybeHead = rob.peekHead();
       if (maybeHead matches tagged Valid .headInfo) begin
         match {.tag, .entry} = headInfo;
         if (entry.completed) begin
-          if (entry.isStore) begin
+          if (entry.isBranch) begin
+            if (entry.mispredicted) begin
+              $display("[COMMIT] branch rob=%0d MISPREDICTED -> trigger recovery, redirect PC = %h", tag.idx, entry.redirectPC);
+              recoverPC    <= entry.redirectPC;
+              flushPending <= True;
+            end else begin
+              $display("[COMMIT] branch rob=%0d resolved correctly", tag.idx);
+            end
+          end else if (entry.isStore) begin
             $display("[COMMIT] Retired store, rob=%0d", tag.idx);
           end else if (entry.dst matches tagged Valid .dstReg) begin
-            $display("[COMMIT] Committed instr writing to x%0d", dstReg);
+            $display("[COMMIT] rob=%0d committed: x%0d <- %0d", tag.idx, dstReg, entry.data);
           end
           rob.commitHead(rename);
         end
       end
     endrule
 
-    rule doExecute (rs.notEmpty && alu.notFull);
+    rule doExecute (rs.notEmpty && alu.notFull && !flushPending);
       let rsEntry <- rs.deq();
       $display("[Execute] Dequeued RS entry: op=%0d dest=p%0d rob=%0d", rsEntry.opcode, rsEntry.dest, rsEntry.robTag.idx);
 
@@ -238,19 +279,40 @@ package SpeculaCore;
 
     rule doWriteback (alu.notEmpty);
       let aluResp <- alu.deq();
-      
-      $display("[Writeback] ALU result: res=%0d dest=p%0d rob=%0d", aluResp.result, aluResp.dest, aluResp.robTag.idx);
 
-      rob.writeResultAndMark(aluResp.robTag, aluResp.result);
+      if (aluResp.isBranch) begin
+        Bit#(32) actualNextPC = aluResp.actualTaken ? aluResp.actualTarget : (aluResp.pc + 4);
+        Bool mispred = (actualNextPC != brPredNextPC[0]);
 
-      prf.write(aluResp.dest, aluResp.result);
-      prf.markReady(aluResp.dest);
+        rob.completeEntry(aluResp.robTag, 0, mispred, actualNextPC);
+        bp.update(BranchUpdate {
+          pc:         aluResp.pc,
+          targetAddr: aluResp.actualTarget,
+          taken:      aluResp.actualTaken,
+          newHistory: 0
+        });
+        if (!mispred)
+          brOutstanding[1] <= False;
 
-      rs.wakeup(aluResp.dest);
-      $display("[Writeback] Waking up instructions waiting for p%0d", aluResp.dest);
-      
-      $display("[Writeback] ROB[%0d] completed with result=%0d, PRF[p%0d] = %0d",
-               aluResp.robTag.idx, aluResp.result, aluResp.dest, aluResp.result);
+        $display("[Writeback] branch rob=%0d : actualTaken=%0d actual-next=%h predicted-next=%h -> %s",
+                 aluResp.robTag.idx, aluResp.actualTaken, actualNextPC, brPredNextPC[0],
+                 mispred ? "MISPREDICT" : "correct");
+      end else begin
+        $display("[Writeback] ALU result: res=%0d dest=p%0d rob=%0d", aluResp.result, aluResp.dest, aluResp.robTag.idx);
+
+        rob.completeEntry(aluResp.robTag, aluResp.result, False, 0);
+
+        if (aluResp.dest != 0) begin
+          prf.write(aluResp.dest, aluResp.result);
+          prf.markReady(aluResp.dest);
+        end
+
+        rs.wakeup(aluResp.dest);
+        $display("[Writeback] Waking up instructions waiting for p%0d", aluResp.dest);
+
+        $display("[Writeback] ROB[%0d] completed with result=%0d, PRF[p%0d] = %0d",
+                 aluResp.robTag.idx, aluResp.result, aluResp.dest, aluResp.result);
+      end
     endrule
 
   endmodule

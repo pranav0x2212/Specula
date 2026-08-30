@@ -7,8 +7,8 @@ package BranchPredictor;
 
   typedef Bit#(32) Addr;
   typedef Bit#(2) PHTEntry; // 2-bit saturating counter: 0=StronglyNT, 3=StronglyT
-  typedef Bit#(10) GlobalHistory;
-  typedef Bit#(10) PHT_Index;
+  typedef Bit#(6) GlobalHistory;
+  typedef Bit#(6) PHT_Index;
 
   typedef struct {
     Bool prediction;
@@ -30,20 +30,20 @@ package BranchPredictor;
   endinterface
 
   module mkBranchPredictor(BranchPredictor_IFC);
-    Vector#(1024, Reg#(PHTEntry)) pht <- replicateM(mkReg(1));
-    Vector#(256, Reg#(Tuple3#(Bool, Bit#(22), Addr))) btb <- replicateM(mkReg(tuple3(False, 0, 0)));
-    Reg#(GlobalHistory) globalHistory <- mkReg(0); 
+    Vector#(64, Reg#(PHTEntry)) pht <- replicateM(mkReg(1));
+    Vector#(16, Reg#(Tuple3#(Bool, Bit#(24), Addr))) btb <- replicateM(mkReg(tuple3(False, 0, 0)));
+    Reg#(GlobalHistory) globalHistory <- mkReg(0);
 
     method ActionValue#(PredictionResult) predict (Addr pc);
       PHT_Index pc_hash = truncate(pc >> 2);
       PHT_Index pht_idx = truncate(globalHistory ^ pc_hash);
-      PHTEntry counter = pht[pht_idx]; 
+      PHTEntry counter = pht[pht_idx];
       Bool predicted_taken = (counter >= 2);
 
-      Bit#(8) btb_idx = truncate(pc >> 2);
-      match {.btb_valid, .btb_tag, .btb_target} = btb[btb_idx]; 
+      Bit#(4) btb_idx = truncate(pc >> 2);
+      match {.btb_valid, .btb_tag, .btb_target} = btb[btb_idx];
 
-      Bool btb_hit = btb_valid && (btb_tag == truncate(pc >> 10));
+      Bool btb_hit = btb_valid && (btb_tag == truncate(pc >> 6));
       Addr target = btb_hit ? btb_target : (pc + 4);
 
       return PredictionResult {
@@ -66,12 +66,12 @@ package BranchPredictor;
       end
       pht[pht_idx] <= new_counter;
 
-      GlobalHistory new_history = {globalHistory[8:0], pack(upd.taken)};
+      GlobalHistory new_history = {globalHistory[4:0], pack(upd.taken)};
       globalHistory <= new_history;
 
       if(upd.taken) begin
-        Bit#(8) btb_idx = truncate(upd.pc >> 2);
-        Bit#(22) btb_tag = truncate(upd.pc >> 10);
+        Bit#(4) btb_idx = truncate(upd.pc >> 2);
+        Bit#(24) btb_tag = truncate(upd.pc >> 6);
         btb[btb_idx] <= tuple3(True, btb_tag, upd.targetAddr);
       end
     endmethod

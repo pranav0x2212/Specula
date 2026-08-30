@@ -26,6 +26,7 @@ package ALU;
     Bool isBranch;
     Bool actualTaken;
     Data actualTarget;
+    Bit#(32) pc;
   } ALUResp deriving (Bits, FShow);
 
   interface ALU_IFC;
@@ -33,6 +34,8 @@ package ALU;
     method Bool notEmpty();
     method Action enq(ALUReq r);
     method ActionValue#(ALUResp) deq();
+    method Action flush();  
+    method Bool busy();      
   endinterface
 
   module mkALU(ALU_IFC);
@@ -40,7 +43,16 @@ package ALU;
     FIFOF#(ALUReq) reqQ <- mkFIFOF();  // Input buffer
     FIFOF#(ALUResp) respQ <- mkFIFOF();  // Output buffer
 
-    rule execute;
+    Array#(Reg#(Bool)) flushReq <- mkCReg(2, False);
+
+    rule finishFlush (flushReq[0]);
+      reqQ.clear;
+      respQ.clear;
+      flushReq[0] <= False;
+      $display("[ALU] flushed in-flight requests/results");
+    endrule
+
+    rule execute (!flushReq[0]);
       let r = reqQ.first; reqQ.deq;
 
       Data res = 32'd0;
@@ -81,18 +93,19 @@ package ALU;
       endcase
 
       ALUResp out = ALUResp {
-        result: res, 
+        result: res,
         dest: r.dest,
         robTag: r.robTag,
         isBranch: isBranch,
         actualTaken: actualTaken,
-        actualTarget: actualTarget
+        actualTarget: actualTarget,
+        pc: r.pc
       };
       respQ.enq(out);
     endrule
 
     method Bool notFull() = reqQ.notFull;
-    method Bool notEmpty() = respQ.notEmpty;
+    method Bool notEmpty() = respQ.notEmpty && !flushReq[0];
 
     method Action enq(ALUReq r);
       reqQ.enq(r);
@@ -101,6 +114,14 @@ package ALU;
     method ActionValue#(ALUResp) deq();
       let v = respQ.first; respQ.deq;
       return v;
+    endmethod
+
+    method Action flush();
+      flushReq[1] <= True;
+    endmethod
+
+    method Bool busy();
+      return flushReq[0] || reqQ.notEmpty || respQ.notEmpty;
     endmethod
 
   endmodule

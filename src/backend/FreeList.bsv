@@ -7,13 +7,13 @@ package FreeList;
     method ActionValue#(Maybe#(PhysRegTag)) tryAllocate();
     method Action free(PhysRegTag tag);
     method Bool hasFree();
+    method Vector#(NUM_PHYS_REGS, Bool) snapshot();
+    method Action restore(Vector#(NUM_PHYS_REGS, Bool) snap);
   endinterface
 
   module mkFreeList(FreeList_IFC);
 
     Vector#(NUM_PHYS_REGS, Reg#(Bool)) freelist <- replicateM(mkReg(True));
-    
-    // Reserve p0 for the zero register (never allocate it)
     rule init_p0;
       freelist[0] <= False;
     endrule
@@ -45,6 +45,15 @@ package FreeList;
 
     method Bool hasFree();
       return foldl(orFn, False, readVReg(freelist));
+    endmethod
+
+    method Vector#(NUM_PHYS_REGS, Bool) snapshot();
+      return readVReg(freelist);
+    endmethod
+    
+    method Action restore(Vector#(NUM_PHYS_REGS, Bool) snap);
+      for (Integer i = 1; i < valueOf(NUM_PHYS_REGS); i = i + 1)
+        freelist[i] <= snap[i] || freelist[i];
     endmethod
 
   endmodule

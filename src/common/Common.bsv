@@ -46,17 +46,16 @@ package Common;
   function ZERO_TAG zeroTag();
     return 0;
   endfunction
-
+  
   function Instruction getInstruction(Bit#(32) pc);
     case(pc)
-      32'h00000000: return 32'h00100093; // addi x1,  x0, 1     rob0  (seed, ready)
-      32'h00000004: return 32'h00108133; // add  x2,  x1, x1    rob1  needs x1
-      32'h00000008: return 32'h002101B3; // add  x3,  x2, x2    rob2  needs x2  (blocked)
-      32'h0000000c: return 32'h00318233; // add  x4,  x3, x3    rob3  needs x3  (oldest blocked)
-      32'h00000010: return 32'h00A00513; // addi x10, x0, 10    rob4  independent (ready)
-      32'h00000014: return 32'h00B00593; // addi x11, x0, 11    rob5  independent (ready)
-      32'h00000018: return 32'h00C00613; // addi x12, x0, 12    rob6  independent (ready)
-      32'h0000001c: return 32'h00D00693; // addi x13, x0, 13    rob7  independent (ready)
+      32'h00000000: return 32'h00100093; // addi x1, x0, 1
+      32'h00000004: return 32'h00108133; // add  x2, x1, x1
+      32'h00000008: return 32'h00210333; // add  x6, x2, x2
+      32'h0000000c: return 32'h00108463; // beq  x1, x1, +8   -> target 0x14
+      32'h00000010: return 32'h06300493; // addi x9, x0, 99   (wrong path)
+      32'h00000014: return 32'h00700493; // addi x9, x0, 7    (branch target)
+      32'h00000018: return 32'h00800213; // addi x4, x0, 8
       default: return 32'h00000013; // nop (addi x0, x0, 0)
     endcase
   endfunction
@@ -101,21 +100,19 @@ package Common;
       Bit#(5) imm_lo = instr[11:7];
       imm = signExtend({imm_hi, imm_lo});
       rs2Field = instr[24:20];
-    end else if (actualOpcode == 7'b1100011) begin  // B-type immediate
-      Bit#(1) bit12 = instr[31];
-      Bit#(6) bits10_5 = instr[30:25];
-      Bit#(4) bits4_1 = instr[11:8];
-      Bit#(1) bit11 = instr[7];
-      Bit#(12) branchImmTmp = {bit12, bits10_5, bits4_1, bit11};
-      imm = signExtend(branchImmTmp);
+    end else if (actualOpcode == 7'b1100011) begin  // B-type immediate (13-bit, LSB 0)
+      Bit#(13) branchImm = {instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};
+      imm = signExtend13(branchImm);
       rs2Field = instr[24:20];  // B-type uses rs2
     end else begin
       rs2Field = instr[24:20];  // R-type and other types use rs2
     end
-    
+
+    RegIndex rdField = (actualOpcode == 7'b1100011) ? 0 : instr[11:7];
+
     return Decoded {
       opcode: aluOp,
-      rd: instr[11:7],
+      rd: rdField,
       rs1: instr[19:15],
       rs2: rs2Field,
       funct3: funct3,
@@ -168,6 +165,10 @@ package Common;
 
   function Bool isMemoryOp(ALUOp op);
     return (op == ALU_LW || op == ALU_SW);
+  endfunction
+
+  function Bool isBranchOp(ALUOp op);
+    return (op == ALU_BEQ || op == ALU_BNE || op == ALU_BLT || op == ALU_BGE);
   endfunction
   
   function Bool isLoadOp(ALUOp op);

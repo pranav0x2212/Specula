@@ -9,7 +9,7 @@ EXE      ?= sim
 
 BSC      := bsc
 BSC_PATH := +:src:src/common:src/frontend:src/backend
-BSC_FLAGS := -sim -p $(BSC_PATH) -bdir $(OUT_DIR) -info-dir $(OUT_DIR)
+BSC_FLAGS := +RTS -K512M -RTS -sim -p $(BSC_PATH) -bdir $(OUT_DIR) -info-dir $(OUT_DIR)
 
 # ---------- TARGETS -----------
 

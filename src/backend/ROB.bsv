@@ -17,6 +17,7 @@ typedef struct {
   Bool completed;
   Data data;
   Bool isStore;
+  Addr memAddr;        
   Bool isBranch;
   Bool mispredicted;
   Addr redirectPC;
@@ -29,10 +30,11 @@ interface ROB_IFC;
   method Action writeResult(ROBTag tag, Data data);
   method Action markCompleted(ROBTag tag);
   method Action writeResultAndMark(ROBTag tag, Data data);
-  method Action completeEntry(ROBTag tag, Data data, Bool mispredicted, Addr redirectPC);
+  method Action completeEntry(ROBTag tag, Data data, Addr memAddr, Bool mispredicted, Addr redirectPC);
   method Maybe#(Tuple2#(ROBTag, ROBEntry)) peekHead();
+  method ROBTag headTag();     
   method Action commitHead(RenameStage_IFC rename);
-  method Action flushAll();   
+  method Action flushAll();
 endinterface
 
 module mkROB(ROB_IFC);
@@ -68,6 +70,7 @@ module mkROB(ROB_IFC);
       completed: False,
       data: unpack(0),
       isStore: isStore,
+      memAddr: 0,
       isBranch: isBranch,
       mispredicted: False,
       redirectPC: 0
@@ -91,9 +94,10 @@ module mkROB(ROB_IFC);
     completionFlags[tag.idx] <= True;
   endmethod
 
-  method Action completeEntry(ROBTag tag, Data data, Bool mispredicted, Addr redirectPC);
+  method Action completeEntry(ROBTag tag, Data data, Addr memAddr, Bool mispredicted, Addr redirectPC);
     let e = robEntries[tag.idx];
     e.data         = data;
+    e.memAddr      = memAddr;
     e.mispredicted = mispredicted;
     e.redirectPC   = redirectPC;
     robEntries[tag.idx] <= e;
@@ -112,6 +116,7 @@ module mkROB(ROB_IFC);
         completed: completionFlags[head],
         data: entry.data,
         isStore: entry.isStore,
+        memAddr: entry.memAddr,
         isBranch: entry.isBranch,
         mispredicted: entry.mispredicted,
         redirectPC: entry.redirectPC
@@ -119,6 +124,10 @@ module mkROB(ROB_IFC);
       result = tagged Valid tuple2(entry.tag, completedEntry);
     end
     return result;
+  endmethod
+
+  method ROBTag headTag();
+    return mkTag(head);
   endmethod
 
   method Action commitHead(RenameStage_IFC rename);

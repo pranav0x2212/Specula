@@ -9,9 +9,18 @@ package SpeculaCore;
   import ROB::*;
   import ALU::*;
   import LSU::*;
+  import MemQueue::*;
   import BranchPredictor::*;
   import FIFOF::*;
   import Vector::*;
+
+  typedef struct {
+    Bool       isLoad;
+    PhysRegTag dest;
+    Data       data;   
+    Addr       addr;   
+    ROBTag     robTag;
+  } MemResult deriving (Bits, FShow);
 
   module mkSpeculaCore(Empty);
     IfcFetchUnit fetch <- mkFetchUnit;
@@ -22,7 +31,10 @@ package SpeculaCore;
     ROB_IFC rob <- mkROB;
     ALU_IFC alu <- mkALU;
     IfcLSU lsu <- mkLSU;
+    MemQueue_IFC memQ <- mkMemQueue;
     BranchPredictor_IFC bp <- mkBranchPredictor;
+
+    FIFOF#(MemResult) memResultQ <- mkSizedFIFOF(4);
 
     let maxPC = 32'h00000020;
 
@@ -86,6 +98,9 @@ package SpeculaCore;
       rob.flushAll;
       rs.flush;
       alu.flush;
+      memQ.flush;
+      lsu.sqFlush;
+      memResultQ.clear;
       fetchedQ.clear;
       decodedQ.clear;
       renamedInstrQ.clear;
@@ -103,61 +118,59 @@ package SpeculaCore;
       recoveryComplete <= False;
     endrule
 
-    (* descending_urgency = "doRecover, doWriteback" *)
-    (* descending_urgency = "doRecover, doDispatch, doCommit" *)
     rule doDispatch (renamedInstrQ.notEmpty && !flushPending
                      && rob.canAllocate
-                     && (isMemoryOp(renamedInstrQ.first.instr.opcode) || rs.notFull)
+                     && (isMemoryOp(renamedInstrQ.first.instr.opcode)
+                          ? (memQ.notFull && (isLoadOp(renamedInstrQ.first.instr.opcode) || lsu.sqNotFull))
+                          : rs.notFull)
                      && !(isBranchOp(renamedInstrQ.first.instr.opcode) && brOutstanding[0]));
       let r = renamedInstrQ.first;
       Bool isMemoryOp = (r.instr.opcode == ALU_LW) || (r.instr.opcode == ALU_SW);
       Bool isLoad = (r.instr.opcode == ALU_LW);
-      
+
       if (isMemoryOp) begin
         PhysRegTag destTag = 0;
         Maybe#(PhysRegTag) oldPhysDst = tagged Invalid;
         Bool canDispatch = True;
 
-        if (isLoad) begin
+        if (isLoad && r.instr.rd != 0) begin
           let allocResult <- rename.allocateDestReg(r.instr.rd);
           match {.dTag, .oldTag, .success} = allocResult;
-          if (success || r.instr.rd == 0) begin
-            destTag = dTag;
-            oldPhysDst = oldTag;
-            canDispatch = True;
-          end else begin
-            canDispatch = False;
-          end
+          destTag = dTag;
+          oldPhysDst = oldTag;
+          canDispatch = success;
         end
-        
-        if (canDispatch) begin
-          renamedInstrQ.deq; 
-          PhysRegTag addrRegTag = rename.lookupMapping(r.instr.rs1);
-          Maybe#(Data) maybeAddrVal = prf.read(addrRegTag);
-          Data addrValue = 0;
-          if (maybeAddrVal matches tagged Valid .val) begin
-            addrValue = val + signExtend(r.instr.imm[11:0]);
-          end
-          
-          if (isLoad) begin
-            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd != 0 ? tagged Valid destTag : tagged Invalid), oldPhysDst, False, True, False);
 
-            Data loadData <- lsu.load(addrValue);
-            prf.write(destTag, loadData);
-            prf.markReady(destTag);
-            $display("[LSU] Load from addr %h -> p%0d = %h, rob=%0d", addrValue, destTag, loadData, robTag.idx);
-          end else begin
-            let robTag <- rob.allocate(tagged Valid r.instr.rd, tagged Invalid, oldPhysDst, True, True, False);
-            
-            PhysRegTag dataRegTag = rename.lookupMapping(r.instr.rs2);
-            Maybe#(Data) maybeStoreVal = prf.read(dataRegTag);
-            Data storeData = 0;
-            if (maybeStoreVal matches tagged Valid .val) begin
-              storeData = val;
-            end
-            lsu.directStore(addrValue, storeData);
-            $display("[LSU] Store (rob=%0d) addr=%h <- data=%h (IMMEDIATE, marked completed)", robTag.idx, addrValue, storeData);
-          end
+        if (canDispatch) begin
+          renamedInstrQ.deq;
+
+          if (isLoad && r.instr.rd != 0)
+            prf.clear(destTag);
+
+          let robTag <- rob.allocate(
+            (isLoad ? tagged Valid r.instr.rd : tagged Invalid),
+            (isLoad && r.instr.rd != 0 ? tagged Valid destTag : tagged Invalid),
+            oldPhysDst,
+            !isLoad,  
+            False,     
+            False);    
+
+          PhysRegTag basePhys = rename.lookupMapping(r.instr.rs1);
+          PhysRegTag dataPhys = rename.lookupMapping(r.instr.rs2);
+
+          if (!isLoad)
+            lsu.sqAllocate(robTag);
+
+          memQ.enq(MemQEntry {
+            isLoad: isLoad,
+            base:   basePhys,
+            sdata:  dataPhys,
+            imm:    r.instr.imm,
+            dest:   destTag,
+            robTag: robTag
+          });
+          $display("[DISPATCH] %s rob=%0d -> MemQueue (base=x%0d data=x%0d imm=%0d)",
+                   isLoad ? "LOAD" : "STORE", robTag.idx, r.instr.rs1, r.instr.rs2, r.instr.imm);
         end
       end else begin
         if (rs.notFull) begin
@@ -186,7 +199,7 @@ package SpeculaCore;
             Bool src2Ready = prf.isReady(src2PhysReg);
 
             Bit#(7) actualOpcode = r.instr.raw[6:0];
-            Bool shouldUseImm = (actualOpcode == 7'b0010011);  // ADDI only; branches compare rs1/rs2
+            Bool shouldUseImm = (actualOpcode == 7'b0010011);  
 
             let rsEntry = RSEntry {
               opcode: r.instr.opcode,
@@ -225,7 +238,9 @@ package SpeculaCore;
       halted <= True;
     endrule
 
-    rule doTerminate (halted && !flushPending && !rs.notEmpty && !alu.notEmpty && rob.isEmpty());
+    rule doTerminate (halted && !flushPending && !rs.notEmpty && !alu.notEmpty
+                      && !memQ.notEmpty && lsu.sqEmpty && !memResultQ.notEmpty
+                      && rob.isEmpty());
       $display("[Specula] Simulation complete - all instructions retired");
       $finish();
     endrule
@@ -244,7 +259,9 @@ package SpeculaCore;
               $display("[COMMIT] branch rob=%0d resolved correctly", tag.idx);
             end
           end else if (entry.isStore) begin
-            $display("[COMMIT] Retired store, rob=%0d", tag.idx);
+            lsu.storeToMem(entry.memAddr, entry.data);  
+            lsu.sqPop();                                
+            $display("[COMMIT] store rob=%0d retired (addr=%h data=%0d)", tag.idx, entry.memAddr, entry.data);
           end else if (entry.dst matches tagged Valid .dstReg) begin
             $display("[COMMIT] rob=%0d committed: x%0d <- %0d", tag.idx, dstReg, entry.data);
           end
@@ -277,6 +294,77 @@ package SpeculaCore;
       $display("[Execute] Sent to ALU: op=%0d a=%0d b=%0d dest=p%0d rob=%0d (useImm=%0d)", rsEntry.opcode, aVal, bVal, rsEntry.dest, rsEntry.robTag.idx, rsEntry.useImmediate);
     endrule
 
+    function Vector#(MEMQ_SIZE, Bool) memIssuableMask();
+      ROBTag hTag = rob.headTag;
+      Vector#(MEMQ_SIZE, Bool)      vmask   = memQ.validMask;
+      Vector#(MEMQ_SIZE, MemQEntry) entries = memQ.peekAll;
+      Vector#(MEMQ_SIZE, Bool) m = newVector;
+      for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1) begin
+        Bool ok = False;
+        if (vmask[i]) begin
+          let e = entries[i];
+          Bool baseRdy = prf.isReady(e.base);
+          Bool dataRdy = e.isLoad || prf.isReady(e.sdata);
+          Bool ordOK   = !e.isLoad || !lsu.sqOlderStorePending(e.robTag, hTag);
+          ok = baseRdy && dataRdy && ordOK;
+        end
+        m[i] = ok;
+      end
+      return m;
+    endfunction
+
+    function Bool memIssuableExists();
+      Vector#(MEMQ_SIZE, Bool) m = memIssuableMask();
+      Bool any = False;
+      for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1) any = any || m[i];
+      return any;
+    endfunction
+
+    rule doMemIssue (!flushPending && memResultQ.notFull && memIssuableExists);
+      ROBTag hTag = rob.headTag;
+      Vector#(MEMQ_SIZE, MemQEntry) entries = memQ.peekAll;
+      Vector#(MEMQ_SIZE, Bool)      issuable = memIssuableMask();
+
+      Maybe#(MemQIdx) pick = tagged Invalid;
+      UInt#(7) bestAge = 7'd127;
+      for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1) begin
+        if (issuable[i]) begin
+          let e = entries[i];
+          UInt#(7) age = extend(e.robTag.idx - hTag.idx);
+          if (age < bestAge) begin
+            bestAge = age;
+            pick = tagged Valid fromInteger(i);
+          end
+        end
+      end
+
+      if (pick matches tagged Valid .idx) begin
+        let e = entries[idx];
+        Data baseVal = fromMaybe(0, prf.read(e.base));
+        Addr addr = baseVal + e.imm;
+
+        if (e.isLoad) begin
+          let fwd = lsu.sqForward(addr, e.robTag, hTag);
+          Data result = 0;
+          if (fwd matches tagged Valid .d) begin
+            result = d;
+            $display("[LSU] Load rob=%0d addr=%h FORWARDED from store queue: data=%h", e.robTag.idx, addr, d);
+          end else begin
+            let m <- lsu.load(addr);
+            result = m;
+          end
+          memResultQ.enq(MemResult { isLoad: True, dest: e.dest, data: result, addr: 0, robTag: e.robTag });
+          $display("[MEMQ] load rob=%0d issued: addr=%h result=%h", e.robTag.idx, addr, result);
+        end else begin
+          Data sdata = fromMaybe(0, prf.read(e.sdata));
+          lsu.sqExecStore(e.robTag, addr, sdata);   // fill store queue for forwarding
+          memResultQ.enq(MemResult { isLoad: False, dest: 0, data: sdata, addr: addr, robTag: e.robTag });
+          $display("[MEMQ] store rob=%0d issued: addr=%h data=%h", e.robTag.idx, addr, sdata);
+        end
+        memQ.issue(idx);
+      end
+    endrule
+
     rule doWriteback (alu.notEmpty);
       let aluResp <- alu.deq();
 
@@ -284,7 +372,7 @@ package SpeculaCore;
         Bit#(32) actualNextPC = aluResp.actualTaken ? aluResp.actualTarget : (aluResp.pc + 4);
         Bool mispred = (actualNextPC != brPredNextPC[0]);
 
-        rob.completeEntry(aluResp.robTag, 0, mispred, actualNextPC);
+        rob.completeEntry(aluResp.robTag, 0, 0, mispred, actualNextPC);
         bp.update(BranchUpdate {
           pc:         aluResp.pc,
           targetAddr: aluResp.actualTarget,
@@ -300,7 +388,7 @@ package SpeculaCore;
       end else begin
         $display("[Writeback] ALU result: res=%0d dest=p%0d rob=%0d", aluResp.result, aluResp.dest, aluResp.robTag.idx);
 
-        rob.completeEntry(aluResp.robTag, aluResp.result, False, 0);
+        rob.completeEntry(aluResp.robTag, aluResp.result, 0, False, 0);
 
         if (aluResp.dest != 0) begin
           prf.write(aluResp.dest, aluResp.result);
@@ -312,6 +400,25 @@ package SpeculaCore;
 
         $display("[Writeback] ROB[%0d] completed with result=%0d, PRF[p%0d] = %0d",
                  aluResp.robTag.idx, aluResp.result, aluResp.dest, aluResp.result);
+      end
+    endrule
+
+    (* descending_urgency = "doRecover, doWriteback" *)
+    (* descending_urgency = "doRecover, doDispatch, doCommit" *)
+    (* descending_urgency = "doWriteback, doMemWriteback" *)
+    (* descending_urgency = "doMemWriteback, doMemIssue" *)
+    rule doMemWriteback (memResultQ.notEmpty);
+      let mr = memResultQ.first; memResultQ.deq;
+      rob.completeEntry(mr.robTag, mr.data, mr.addr, False, 0);
+      if (mr.isLoad) begin
+        if (mr.dest != 0) begin
+          prf.write(mr.dest, mr.data);
+          prf.markReady(mr.dest);
+        end
+        rs.wakeup(mr.dest);
+        $display("[Writeback] load rob=%0d result -> p%0d = %h", mr.robTag.idx, mr.dest, mr.data);
+      end else begin
+        $display("[Writeback] store rob=%0d marked complete", mr.robTag.idx);
       end
     endrule
 

@@ -49,13 +49,14 @@ package Common;
   
   function Instruction getInstruction(Bit#(32) pc);
     case(pc)
-      32'h00000000: return 32'h00100093; // addi x1, x0, 1
+      32'h00000000: return 32'h02a00093; // addi x1, x0, 42
       32'h00000004: return 32'h00108133; // add  x2, x1, x1
-      32'h00000008: return 32'h00210333; // add  x6, x2, x2
-      32'h0000000c: return 32'h00108463; // beq  x1, x1, +8   -> target 0x14
-      32'h00000010: return 32'h06300493; // addi x9, x0, 99   (wrong path)
-      32'h00000014: return 32'h00700493; // addi x9, x0, 7    (branch target)
-      32'h00000018: return 32'h00800213; // addi x4, x0, 8
+      32'h00000008: return 32'h00202023; // sw   x2, 0(x0)
+      32'h0000000c: return 32'h00002183; // lw   x3, 0(x0)
+      32'h00000010: return 32'h00118233; // add  x4, x3, x1
+      32'h00000014: return 32'h00900293; // addi x5, x0, 9
+      32'h00000018: return 32'h00502223; // sw   x5, 4(x0)
+      32'h0000001c: return 32'h00402383; // lw   x7, 4(x0)
       default: return 32'h00000013; // nop (addi x0, x0, 0)
     endcase
   endfunction
@@ -182,6 +183,12 @@ package Common;
   typedef struct {
     UInt#(6) idx;
   } ROBTag deriving (Bits, FShow);
+
+  function Bool isOlderRob(ROBTag a, ROBTag b, ROBTag head);
+    UInt#(6) da = a.idx - head.idx;
+    UInt#(6) db = b.idx - head.idx;
+    return da < db;
+  endfunction
 
   typedef struct {
     ALUOp opcode;

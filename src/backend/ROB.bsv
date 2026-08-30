@@ -13,21 +13,26 @@ typedef struct {
   ROBTag tag;
   Maybe#(RegIndex) dst;
   Maybe#(PhysRegTag) physDst;
-  Maybe#(PhysRegTag) oldPhysDst;  
+  Maybe#(PhysRegTag) oldPhysDst;
   Bool completed;
   Data data;
-  Bool isStore; 
+  Bool isStore;
+  Bool isBranch;
+  Bool mispredicted;
+  Addr redirectPC;
 } ROBEntry deriving (Bits, FShow);
 
 interface ROB_IFC;
   method Bool canAllocate();
   method Bool isEmpty();
-  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted);
+  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch);
   method Action writeResult(ROBTag tag, Data data);
   method Action markCompleted(ROBTag tag);
   method Action writeResultAndMark(ROBTag tag, Data data);
+  method Action completeEntry(ROBTag tag, Data data, Bool mispredicted, Addr redirectPC);
   method Maybe#(Tuple2#(ROBTag, ROBEntry)) peekHead();
   method Action commitHead(RenameStage_IFC rename);
+  method Action flushAll();   
 endinterface
 
 module mkROB(ROB_IFC);
@@ -50,7 +55,7 @@ module mkROB(ROB_IFC);
     return (count == 0);
   endmethod
 
-  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted);
+  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch);
     if (!(count < fromInteger(valueOf(NumEntries))))
       $fatal(1, "ROB full!");
 
@@ -60,9 +65,12 @@ module mkROB(ROB_IFC);
       dst: dst,
       physDst: physDst,
       oldPhysDst: oldPhysDst,
-      completed: False,  
+      completed: False,
       data: unpack(0),
-      isStore: isStore
+      isStore: isStore,
+      isBranch: isBranch,
+      mispredicted: False,
+      redirectPC: 0
     };
     completionFlags[tail] <= startCompleted;
     tail <= tail + 1;
@@ -83,6 +91,15 @@ module mkROB(ROB_IFC);
     completionFlags[tag.idx] <= True;
   endmethod
 
+  method Action completeEntry(ROBTag tag, Data data, Bool mispredicted, Addr redirectPC);
+    let e = robEntries[tag.idx];
+    e.data         = data;
+    e.mispredicted = mispredicted;
+    e.redirectPC   = redirectPC;
+    robEntries[tag.idx] <= e;
+    completionFlags[tag.idx] <= True;
+  endmethod
+
   method Maybe#(Tuple2#(ROBTag, ROBEntry)) peekHead();
     Maybe#(Tuple2#(ROBTag, ROBEntry)) result = tagged Invalid;
     if (count > 0) begin
@@ -94,7 +111,10 @@ module mkROB(ROB_IFC);
         oldPhysDst: entry.oldPhysDst,
         completed: completionFlags[head],
         data: entry.data,
-        isStore: entry.isStore
+        isStore: entry.isStore,
+        isBranch: entry.isBranch,
+        mispredicted: entry.mispredicted,
+        redirectPC: entry.redirectPC
       };
       result = tagged Valid tuple2(entry.tag, completedEntry);
     end
@@ -113,6 +133,13 @@ module mkROB(ROB_IFC);
       head <= head + 1;
       count <= count - 1;
     end
+  endmethod
+
+  method Action flushAll();
+    head  <= 0;
+    tail  <= 0;
+    count <= 0;
+    $display("[ROB] flushed all entries");
   endmethod
 
 endmodule

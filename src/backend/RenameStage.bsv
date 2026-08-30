@@ -12,6 +12,8 @@ package RenameStage;
     method PhysRegTag lookupMapping(RegIndex r);
     method Bool isWritten(RegIndex r);
     method Action freeReg(PhysRegTag tag);
+    method Action checkpoint();
+    method Action restoreCheckpoint();
   endinterface
 
   module mkRenameStage(RenameStage_IFC);
@@ -20,6 +22,9 @@ package RenameStage;
     FreeList_IFC freelist <- mkFreeList;
 
     Reg#(Decoded) currentInstr <- mkRegU;
+    Reg#(Vector#(32, PhysRegTag))            shadowMap     <- mkRegU;
+    Reg#(Vector#(32, Bool))                  shadowWritten <- mkRegU;
+    Reg#(Vector#(NUM_PHYS_REGS, Bool))       shadowFree    <- mkRegU;
 
     method Action start(Decoded d);
       currentInstr <= d;
@@ -76,6 +81,20 @@ package RenameStage;
     method Action freeReg(PhysRegTag tag);
       freelist.free(tag);
       $display("[RENAME] Freed physical register p%0d", tag);
+    endmethod
+
+    method Action checkpoint();
+      shadowMap     <= readVReg(archRegMap);
+      shadowWritten <= readVReg(archRegWritten);
+      shadowFree    <= freelist.snapshot();
+      $display("[RENAME] checkpoint taken");
+    endmethod
+
+    method Action restoreCheckpoint();
+      writeVReg(archRegMap, shadowMap);
+      writeVReg(archRegWritten, shadowWritten);
+      freelist.restore(shadowFree);
+      $display("[RENAME] rename map + free list restored from checkpoint");
     endmethod
 
   endmodule

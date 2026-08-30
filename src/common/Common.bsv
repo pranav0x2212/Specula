@@ -47,19 +47,9 @@ package Common;
     return 0;
   endfunction
   
-  function Instruction getInstruction(Bit#(32) pc);
-    case(pc)
-      32'h00000000: return 32'h02a00093; // addi x1, x0, 42
-      32'h00000004: return 32'h00108133; // add  x2, x1, x1
-      32'h00000008: return 32'h00202023; // sw   x2, 0(x0)
-      32'h0000000c: return 32'h00002183; // lw   x3, 0(x0)
-      32'h00000010: return 32'h00118233; // add  x4, x3, x1
-      32'h00000014: return 32'h00900293; // addi x5, x0, 9
-      32'h00000018: return 32'h00502223; // sw   x5, 4(x0)
-      32'h0000001c: return 32'h00402383; // lw   x7, 4(x0)
-      default: return 32'h00000013; // nop (addi x0, x0, 0)
-    endcase
-  endfunction
+  // M1: the instruction stream is no longer a hard-coded ROM. It is an
+  // external image (`program.hex`) loaded by mkFetchUnit. See src/frontend/
+  // FetchUnit.bsv and the Makefile `program.hex` / `sw/ProgramImage.bsv` rules.
 
   function Decoded decode(Instruction instr, Bit#(32) pc);
     Bit#(7) actualOpcode = instr[6:0];

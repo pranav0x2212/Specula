@@ -3,6 +3,7 @@ package SpeculaCore;
   import FetchUnit::*;
   import DecodeUnit::*;
   import Common::*;
+  import ProgramImage::*;
   import RenameStage::*;
   import PRF::*;
   import ReservationStation::*;
@@ -36,7 +37,15 @@ package SpeculaCore;
 
     FIFOF#(MemResult) memResultQ <- mkSizedFIFOF(4);
 
-    let maxPC = 32'h00000020;
+    // M2: normal program completion is an explicit store to `tohostAddr`
+    // (see doCommit) -- a simulation-only MMIO sink. A store of 1 means PASS,
+    // any other value means FAIL; either way the simulator finishes.
+    //
+    // maxPC is now only a *safety* bound: the instruction image is NOP-padded
+    // to `imemWords`, so if a buggy program never writes tohost, fetch simply
+    // runs off the padding and the existing halt/terminate path stops the run.
+    Addr      tohostAddr = 32'h00000700;
+    Bit#(32)  maxPC      = fromInteger(imemWords) * 4;
 
     Reg#(Bit#(32)) pc <- mkReg(0);
     Reg#(Bool) halted <- mkReg(False);
@@ -53,7 +62,7 @@ package SpeculaCore;
     FIFOF#(RenamedInstr) renamedInstrQ <- mkSizedFIFOF(8);
 
     rule doFetch (!halted && !flushPending && pc < maxPC);
-      let instr = getInstruction(pc);
+      let instr = fetch.getInstr(pc);
       let pr <- bp.predict(pc);
       Bool predTaken = pr.prediction && pr.isValid;
       Bit#(32) predNext = predTaken ? pr.targetAddr : (pc + 4);
@@ -234,7 +243,7 @@ package SpeculaCore;
       if (cycleCount > 100000000)
         $display("[Specula] Max cycles reached (%0d), terminating", cycleCount);
       else
-        $display("[Specula] Halting at PC: %h", pc);
+        $display("[Specula] WARNING: fetch reached maxPC safety bound (%h) without a tohost write - halting", maxPC);
       halted <= True;
     endrule
 
@@ -259,9 +268,20 @@ package SpeculaCore;
               $display("[COMMIT] branch rob=%0d resolved correctly", tag.idx);
             end
           end else if (entry.isStore) begin
-            lsu.storeToMem(entry.memAddr, entry.data);  
-            lsu.sqPop();                                
-            $display("[COMMIT] store rob=%0d retired (addr=%h data=%0d)", tag.idx, entry.memAddr, entry.data);
+            lsu.sqPop();
+            if (entry.memAddr == tohostAddr) begin
+              // M2: explicit program termination signal.
+              $display("[Specula] tohost store retired: addr=%h data=%0d", entry.memAddr, entry.data);
+              if (entry.data == 1)
+                $display("[Specula] TEST PASSED (tohost = 1)");
+              else
+                $display("[Specula] TEST FAILED (tohost = %0d)", entry.data);
+              $display("[Specula] Simulation complete - terminated by tohost");
+              $finish(0);
+            end else begin
+              lsu.storeToMem(entry.memAddr, entry.data);
+              $display("[COMMIT] store rob=%0d retired (addr=%h data=%0d)", tag.idx, entry.memAddr, entry.data);
+            end
           end else if (entry.dst matches tagged Valid .dstReg) begin
             $display("[COMMIT] rob=%0d committed: x%0d <- %0d", tag.idx, dstReg, entry.data);
           end

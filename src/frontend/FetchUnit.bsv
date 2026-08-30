@@ -1,37 +1,35 @@
 package FetchUnit;
 
   import Common::*;
+  import ProgramImage::*;
   import RegFile::*;
+
+  // Instruction memory for Specula.
+  //
+  // M1: the instruction stream is an externally generated image (`program.hex`,
+  // one 32-bit word per line, program order) produced from `sw/test.c` by the
+  // Makefile. The compiled program occupies the first `progWords` entries; the
+  // Makefile pads the file with NOPs out to `imemWords` so fetch past the end
+  // of the program lands on NOPs rather than out-of-bounds reads. Both counts
+  // come from the generated `ProgramImage` package.
+  //
+  // The word at byte address `pc` lives at `imem[pc >> 2]`.
 
   interface IfcFetchUnit;
     method Action start(Bit#(32) pc);
-    method Instruction getFetched();
+    method Instruction getInstr(Bit#(32) pc);
   endinterface
 
   module mkFetchUnit(IfcFetchUnit);
-    Reg#(Bit#(32)) pcReg <- mkReg(0);
-    Reg#(Instruction) fetchedInstr <- mkReg(0);
-    Reg#(Bool) started <- mkReg(False);
-
-    let maxPC = 32'h00000100;
-
-    RegFile#(Bit#(32), Instruction) imem <- mkRegFileFull();
-
-    rule preload;
-      imem.upd(0, 32'h00508193);
-      noAction;
-    endrule
+    RegFile#(Bit#(32), Instruction) imem <-
+      mkRegFileLoad("program.hex", 0, fromInteger(imemWords - 1));
 
     method Action start(Bit#(32) pc);
-      pcReg <= pc;
-      let instr = getInstruction(pc);
-      fetchedInstr <= instr;
-      $display("[Fetch] PC: %08x | instr: %08x", pc, instr);
-      started <= True;
+      $display("[Fetch] PC: %08x | instr: %08x", pc, imem.sub(pc >> 2));
     endmethod
-    
-    method Instruction getFetched();
-      return fetchedInstr;
+
+    method Instruction getInstr(Bit#(32) pc);
+      return imem.sub(pc >> 2);
     endmethod
   endmodule
 

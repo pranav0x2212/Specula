@@ -12,11 +12,12 @@ package ReservationStation;
     method Bool notFull;
     method Bool notEmpty;
     method Action wakeup(PhysRegTag tag);
+    method Action flush();  
   endinterface
 
   module mkReservationStation(ReservationStationIfc);
     Vector#(RS_SIZE, Reg#(RSEntry))       payload <- replicateM(mkRegU);
-    Vector#(RS_SIZE, Array#(Reg#(Bool)))  valid   <- replicateM(mkCReg(2, False));
+    Vector#(RS_SIZE, Array#(Reg#(Bool)))  valid   <- replicateM(mkCReg(3, False));
     Vector#(RS_SIZE, Array#(Reg#(Bool)))  s1Ready <- replicateM(mkCReg(3, False));
     Vector#(RS_SIZE, Array#(Reg#(Bool)))  s2Ready <- replicateM(mkCReg(3, False));
 
@@ -77,6 +78,12 @@ package ReservationStation;
 
     method Bool notFull  = isValid(firstFree());
     method Bool notEmpty = isValid(firstReady());
+
+    method Action flush();
+      for (Integer i = 0; i < valueOf(RS_SIZE); i = i + 1)
+        valid[i][2] <= False;
+      $display("[RS] flushed all entries");
+    endmethod
 
     method Action wakeup(PhysRegTag tag);
       for (Integer i = 0; i < valueOf(RS_SIZE); i = i + 1) begin

@@ -12,7 +12,11 @@ package RenameStage;
     method PhysRegTag lookupMapping(RegIndex r);
     method Bool isWritten(RegIndex r);
     method Action freeReg(PhysRegTag tag);
-    method Action checkpoint();
+    // `alloc` carries the (rd, physTag) allocated for the control-flow instruction
+    // that is taking this checkpoint, so the snapshot reflects post-allocation
+    // state (its rd mapping and its physreg marked in-use). tagged Invalid when
+    // the instruction has no destination (conditional branch, JAL x0, JALR x0).
+    method Action checkpoint(Maybe#(Tuple2#(RegIndex, PhysRegTag)) alloc);
     method Action restoreCheckpoint();
   endinterface
 
@@ -83,10 +87,20 @@ package RenameStage;
       $display("[RENAME] Freed physical register p%0d", tag);
     endmethod
 
-    method Action checkpoint();
-      shadowMap     <= readVReg(archRegMap);
-      shadowWritten <= readVReg(archRegWritten);
-      shadowFree    <= freelist.snapshot();
+    method Action checkpoint(Maybe#(Tuple2#(RegIndex, PhysRegTag)) alloc);
+      Vector#(32, PhysRegTag)      m = readVReg(archRegMap);
+      Vector#(32, Bool)            w = readVReg(archRegWritten);
+      Vector#(NUM_PHYS_REGS, Bool) f = freelist.snapshot();
+      // allocateDestReg()'s register writes land next cycle, so fold this
+      // instruction's own allocation into the snapshot by hand.
+      if (alloc matches tagged Valid {.rd, .tag} &&& rd != 0) begin
+        m[rd]  = tag;
+        w[rd]  = True;
+        f[tag] = False;   // its physreg is in use, not on the free list
+      end
+      shadowMap     <= m;
+      shadowWritten <= w;
+      shadowFree    <= f;
       $display("[RENAME] checkpoint taken");
     endmethod
 

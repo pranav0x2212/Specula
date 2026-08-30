@@ -23,7 +23,8 @@ package ALU;
     Data result;
     PhysRegTag dest;
     ROBTag robTag;
-    Bool isBranch;
+    Bool isBranch;      // resolves through the branch/recovery path (branches + jumps)
+    Bool isJump;        // JAL/JALR: unconditional, writes a link reg, not predicted
     Bool actualTaken;
     Data actualTarget;
     Bit#(32) pc;
@@ -57,14 +58,35 @@ package ALU;
 
       Data res = 32'd0;
       Bool isBranch = False;
+      Bool isJump = False;
       Bool actualTaken = False;
       Data actualTarget = 32'd0;
-      
-      case (r.opcode) 
+
+      case (r.opcode)
         ALU_ADD: res = r.a + r.b;
         ALU_SUB: res = r.a - r.b;
         ALU_AND: res = r.a & r.b;
         ALU_OR: res = r.a | r.b;
+        ALU_XOR: res = r.a ^ r.b;
+        // Shifts: RV32 uses only the low 5 bits of the amount (register or shamt).
+        ALU_SLL: res = r.a << r.b[4:0];
+        ALU_SRL: res = r.a >> r.b[4:0];
+        ALU_SRA: res = signedShiftRight(r.a, r.b[4:0]);
+        ALU_SLT:  res = signedLT(r.a, r.b) ? 32'd1 : 32'd0;
+        ALU_SLTU: res = (r.a < r.b)        ? 32'd1 : 32'd0;
+        ALU_LUI: res = r.b;   // b carries the U-immediate (useImmediate)
+        ALU_JAL: begin
+          // rd <- pc+4 ; redirect to pc + J-immediate
+          isBranch = True; isJump = True; actualTaken = True;
+          actualTarget = r.pc + r.branchOffset;
+          res = r.pc + 4;
+        end
+        ALU_JALR: begin
+          // rd <- pc+4 ; redirect to (rs1 + I-immediate) & ~1
+          isBranch = True; isJump = True; actualTaken = True;
+          actualTarget = (r.a + r.branchOffset) & 32'hFFFFFFFE;
+          res = r.pc + 4;
+        end
         ALU_BEQ: begin
           isBranch = True;
           actualTaken = (r.a == r.b);
@@ -89,6 +111,18 @@ package ALU;
           actualTarget = r.pc + r.branchOffset;
           res = 0;
         end
+        ALU_BLTU: begin
+          isBranch = True;
+          actualTaken = (r.a < r.b);        // unsigned
+          actualTarget = r.pc + r.branchOffset;
+          res = 0;
+        end
+        ALU_BGEU: begin
+          isBranch = True;
+          actualTaken = (r.a >= r.b);       // unsigned
+          actualTarget = r.pc + r.branchOffset;
+          res = 0;
+        end
         default: res = 32'd0;
       endcase
 
@@ -97,6 +131,7 @@ package ALU;
         dest: r.dest,
         robTag: r.robTag,
         isBranch: isBranch,
+        isJump: isJump,
         actualTaken: actualTaken,
         actualTarget: actualTarget,
         pc: r.pc

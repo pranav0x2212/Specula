@@ -52,25 +52,48 @@ package SpeculaCore;
     Reg#(Bool) flushPending <- mkReg(False);
     Reg#(UInt#(32)) cycleCount <- mkReg(0);
 
-    Array#(Reg#(Bit#(32))) brPredNextPC  <- mkCReg(2, 0);   
-    Array#(Reg#(Bool))  brOutstanding    <- mkCReg(2, False); 
-    Reg#(Bit#(32))      recoverPC        <- mkReg(0);      
-    Reg#(Bool)          recoveryComplete <- mkReg(False); 
+    Array#(Reg#(Bit#(32))) brPredNextPC  <- mkCReg(2, 0);
+    Array#(Reg#(Bool))  brOutstanding    <- mkCReg(2, False);
+    Reg#(Bit#(32))      recoverPC        <- mkReg(0);
+    Reg#(Bool)          recoveryComplete <- mkReg(False);
+
+    // M3: a control-flow instruction is live somewhere between fetch and
+    // resolution. `brPredNextPC` is a single shared register captured at fetch
+    // and read at writeback, so at most one control-flow instruction may be in
+    // that window at a time. Set in doFetch, cleared at branch/jump writeback
+    // and on recovery.  (brOutstanding is set later, at dispatch, so it cannot
+    // guard fetch by itself.)
+    //
+    // Port map: doFetch reads+writes [0]; doWriteback clears [1]; doRecover
+    // clears [2]. doFetch reading the lowest port means it does not take an
+    // in-cycle ordering dependency on the clearers (it is gated by
+    // !flushPending anyway), which keeps the rule schedule acyclic.
+    Array#(Reg#(Bool))  cfInFlight       <- mkCReg(3, False);
 
     FIFOF#(Tuple2#(Bit#(32), Instruction)) fetchedQ <- mkFIFOF();
     FIFOF#(Tuple2#(Bit#(32), Decoded))     decodedQ <- mkFIFOF();
     FIFOF#(RenamedInstr) renamedInstrQ <- mkSizedFIFOF(8);
 
-    rule doFetch (!halted && !flushPending && pc < maxPC);
+    rule doFetch (!halted && !flushPending && pc < maxPC
+                  && !(cfInFlight[0] && isControlFlowInstr(fetch.getInstr(pc))));
       let instr = fetch.getInstr(pc);
       let pr <- bp.predict(pc);
       Bool predTaken = pr.prediction && pr.isValid;
-      Bit#(32) predNext = predTaken ? pr.targetAddr : (pc + 4);
 
-      if (instr[6:0] == 7'b1100011) begin
+      Bool isCondBranch = (instr[6:0] == 7'b1100011);
+      Bool isCF         = isControlFlowInstr(instr);
+
+      // Only conditional branches are predicted. Jumps (JAL/JALR) always take
+      // the recovery redirect at resolution, so the frontend keeps going
+      // sequentially and the captured prediction is pc+4 -> guaranteed
+      // "mispredict" -> deterministic redirect.
+      Bit#(32) predNext = (isCondBranch && predTaken) ? pr.targetAddr : (pc + 4);
+
+      if (isCF) begin
         brPredNextPC[1] <= predNext;
-        $display("[FETCH] branch @ %h : predicted %s, predicted-next PC = %h",
-                 pc, predTaken ? "TAKEN" : "not-taken", predNext);
+        cfInFlight[0]   <= True;
+        $display("[FETCH] control-flow @ %h (%s): predicted-next PC = %h",
+                 pc, isCondBranch ? "branch" : "jump", predNext);
       end
 
       fetch.start(pc);
@@ -118,6 +141,7 @@ package SpeculaCore;
       pc <= recoverPC;
       halted <= False;
       brOutstanding[1] <= False;
+      cfInFlight[2] <= False;
       recoveryComplete <= True;
     endrule
 
@@ -132,7 +156,7 @@ package SpeculaCore;
                      && (isMemoryOp(renamedInstrQ.first.instr.opcode)
                           ? (memQ.notFull && (isLoadOp(renamedInstrQ.first.instr.opcode) || lsu.sqNotFull))
                           : rs.notFull)
-                     && !(isBranchOp(renamedInstrQ.first.instr.opcode) && brOutstanding[0]));
+                     && !(isControlFlowOp(renamedInstrQ.first.instr.opcode) && brOutstanding[0]));
       let r = renamedInstrQ.first;
       Bool isMemoryOp = (r.instr.opcode == ALU_LW) || (r.instr.opcode == ALU_SW);
       Bool isLoad = (r.instr.opcode == ALU_LW);
@@ -189,17 +213,19 @@ package SpeculaCore;
           if (r.instr.rd == 0 || success) begin
             renamedInstrQ.deq;
 
-            Bool isBr = isBranchOp(r.instr.opcode);
+            Bool isCF   = isControlFlowOp(r.instr.opcode);
+            Bool isJump = isJumpOp(r.instr.opcode);
 
             if (r.instr.rd != 0)
               prf.clear(destTag);
 
-            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd == 0 ? tagged Invalid : tagged Valid destTag), oldPhysDst, False, False, isBr);
+            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd == 0 ? tagged Invalid : tagged Valid destTag), oldPhysDst, False, False, isCF);
 
-            if (isBr) begin
-              rename.checkpoint();
+            if (isCF) begin
+              rename.checkpoint(r.instr.rd != 0 ? tagged Valid tuple2(r.instr.rd, destTag) : tagged Invalid);
               brOutstanding[0] <= True;
-              $display("[DISPATCH] branch rob=%0d : rename + free-list checkpoint taken", robTag.idx);
+              $display("[DISPATCH] %s rob=%0d : rename + free-list checkpoint taken",
+                       isJump ? "jump" : "branch", robTag.idx);
             end
 
             PhysRegTag src1PhysReg = rename.lookupMapping(r.instr.rs1);
@@ -208,7 +234,9 @@ package SpeculaCore;
             Bool src2Ready = prf.isReady(src2PhysReg);
 
             Bit#(7) actualOpcode = r.instr.raw[6:0];
-            Bool shouldUseImm = (actualOpcode == 7'b0010011);  
+            // OP-IMM (immediate ALU) and LUI (rd <- immediate) take operand b
+            // from the decoded immediate; everything else uses rs2.
+            Bool shouldUseImm = (actualOpcode == 7'b0010011) || (actualOpcode == 7'b0110111);
 
             let rsEntry = RSEntry {
               opcode: r.instr.opcode,
@@ -392,19 +420,37 @@ package SpeculaCore;
         Bit#(32) actualNextPC = aluResp.actualTaken ? aluResp.actualTarget : (aluResp.pc + 4);
         Bool mispred = (actualNextPC != brPredNextPC[0]);
 
-        rob.completeEntry(aluResp.robTag, 0, 0, mispred, actualNextPC);
-        bp.update(BranchUpdate {
-          pc:         aluResp.pc,
-          targetAddr: aluResp.actualTarget,
-          taken:      aluResp.actualTaken,
-          newHistory: 0
-        });
+        // For JAL/JALR, aluResp.result is the link value (pc+4). For a
+        // conditional branch it is 0 and dest is 0, so the writes below no-op.
+        rob.completeEntry(aluResp.robTag, aluResp.result, 0, mispred, actualNextPC);
+
+        if (aluResp.dest != 0) begin
+          prf.write(aluResp.dest, aluResp.result);
+          prf.markReady(aluResp.dest);
+        end
+        rs.wakeup(aluResp.dest);
+
+        // Only real branches train the predictor; jumps are not predicted.
+        if (!aluResp.isJump)
+          bp.update(BranchUpdate {
+            pc:         aluResp.pc,
+            targetAddr: aluResp.actualTarget,
+            taken:      aluResp.actualTaken,
+            newHistory: 0
+          });
+
         if (!mispred)
           brOutstanding[1] <= False;
+        cfInFlight[1] <= False;
 
-        $display("[Writeback] branch rob=%0d : actualTaken=%0d actual-next=%h predicted-next=%h -> %s",
-                 aluResp.robTag.idx, aluResp.actualTaken, actualNextPC, brPredNextPC[0],
-                 mispred ? "MISPREDICT" : "correct");
+        if (aluResp.isJump)
+          $display("[Writeback] jump rob=%0d : link=%h target=%h predicted-next=%h -> %s",
+                   aluResp.robTag.idx, aluResp.result, actualNextPC, brPredNextPC[0],
+                   mispred ? "REDIRECT" : "sequential");
+        else
+          $display("[Writeback] branch rob=%0d : actualTaken=%0d actual-next=%h predicted-next=%h -> %s",
+                   aluResp.robTag.idx, aluResp.actualTaken, actualNextPC, brPredNextPC[0],
+                   mispred ? "MISPREDICT" : "correct");
       end else begin
         $display("[Writeback] ALU result: res=%0d dest=p%0d rob=%0d", aluResp.result, aluResp.dest, aluResp.robTag.idx);
 

@@ -11,20 +11,22 @@ BSC      := bsc
 BSC_PATH := +:src:src/common:src/frontend:src/backend:sw
 BSC_FLAGS := +RTS -K512M -RTS -sim -p $(BSC_PATH) -bdir $(OUT_DIR) -info-dir $(OUT_DIR)
 
-# ---------- TEST PROGRAM / INSTRUCTION IMAGE (M1/M2) -----------
+# ---------- TEST PROGRAM / INSTRUCTION IMAGE (M1/M2/M3) -----------
 #
-# sw/test.c  --(gcc)-->  build/test.elf  --(objcopy)-->  build/test.bin
-#   --(od/awk)--> program.hex           one 32-bit word per line, program order,
-#                                       NOP-padded to IMEM_WORDS entries
-#   --(printf)--> sw/ProgramImage.bsv   progWords / imemWords for the core
+# sw/start.S + sw/test.c  --(gcc, sw/link.ld)-->  build/test.elf
+#   --(objcopy)--> build/test.bin
+#   --(od/awk)---> program.hex           one 32-bit word per line, program order,
+#                                        NOP-padded to IMEM_WORDS entries
+#   --(printf)---> sw/ProgramImage.bsv   progWords / imemWords for the core
 #
 # program.hex is read at run time by mkRegFileLoad, relative to the directory
 # the simulator is launched from (the repo root), so it lives there.
 #
 # M2: the program terminates by storing to the tohost MMIO address; the NOP
-# padding is only a safety runway so fetch never reads past the image.
+#     padding is only a safety runway so fetch never reads past the image.
+# M3: sw/start.S sets sp then `jal main`; sw/link.ld puts _start at 0x0.
 
-IMEM_WORDS ?= 128
+IMEM_WORDS ?= 256
 NOP        := 00000013
 
 RV_PREFIX  ?= riscv32-unknown-elf-
@@ -33,9 +35,10 @@ RV_OBJCOPY := $(RV_PREFIX)objcopy
 RV_OBJDUMP := $(RV_PREFIX)objdump
 
 RV_CFLAGS  := -march=rv32i -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding -O1
-RV_LDFLAGS := -Wl,-Ttext=0x0 -e _start
+RV_LDFLAGS := -Wl,-T,sw/link.ld
 
-SW_SRC   := sw/test.c
+SW_SRCS  := sw/start.S sw/test.c
+SW_LD    := sw/link.ld
 ELF      := $(OUT_DIR)/test.elf
 BIN      := $(OUT_DIR)/test.bin
 HEX      := program.hex
@@ -49,9 +52,9 @@ all: $(OUT_DIR)/$(EXE)
 
 image: $(HEX) $(IMG_BSV)
 
-$(ELF): $(SW_SRC) | $(OUT_DIR)
-	@echo "[img] compiling $(SW_SRC)"
-	$(RV_CC) $(RV_CFLAGS) $(RV_LDFLAGS) -o $@ $<
+$(ELF): $(SW_SRCS) $(SW_LD) | $(OUT_DIR)
+	@echo "[img] compiling $(SW_SRCS)"
+	$(RV_CC) $(RV_CFLAGS) $(RV_LDFLAGS) -o $@ $(SW_SRCS)
 
 $(BIN): $(ELF)
 	$(RV_OBJCOPY) -O binary $< $@
@@ -66,7 +69,7 @@ $(HEX): $(BIN)
 
 $(IMG_BSV): $(BIN)
 	@bytes=$$(wc -c < $<); words=$$(( bytes / 4 )); \
-	printf '// GENERATED from %s by the Makefile. Do not edit; not tracked.\npackage ProgramImage;\n  Integer progWords = %s;  // real compiled instructions\n  Integer imemWords = %s;  // program.hex size incl. NOP padding\nendpackage\n' "$(SW_SRC)" "$$words" "$(IMEM_WORDS)" > $@; \
+	printf '// GENERATED from %s by the Makefile. Do not edit; not tracked.\npackage ProgramImage;\n  Integer progWords = %s;  // real compiled instructions\n  Integer imemWords = %s;  // program.hex size incl. NOP padding\nendpackage\n' "$(SW_SRCS)" "$$words" "$(IMEM_WORDS)" > $@; \
 	echo "[img] $@ : progWords=$$words imemWords=$(IMEM_WORDS)"
 
 disasm: $(ELF)

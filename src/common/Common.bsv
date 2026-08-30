@@ -13,7 +13,13 @@ package Common;
   typedef enum {
     ALU_ADD, ALU_SUB, ALU_AND, ALU_OR,
     ALU_BEQ, ALU_BNE, ALU_BLT, ALU_BGE,
-    ALU_LW, ALU_SW
+    ALU_LW, ALU_SW,
+    ALU_JAL, ALU_JALR,         // M3: unconditional jumps (branch-like, always redirect)
+    ALU_SLL, ALU_SRL, ALU_SRA, // M4: shifts (amount = operand[4:0])
+    ALU_SLT, ALU_SLTU,         // M4: set-less-than -> 0/1
+    ALU_XOR,                   // M4
+    ALU_LUI,                   // M4: rd <- immediate (no source registers)
+    ALU_BLTU, ALU_BGEU         // M4: unsigned conditional branches
   } ALUOp deriving (Bits, Eq, FShow);
 
   typedef struct {
@@ -55,14 +61,33 @@ package Common;
     Bit#(7) actualOpcode = instr[6:0];
     Bit#(3) funct3 = instr[14:12];
 
+    Bit#(1) f7bit30 = instr[30];  // distinguishes ADD/SUB and SRL/SRA (SRLI/SRAI)
+
     ALUOp aluOp;
-    if (actualOpcode == 7'b0110011) begin  // R-type
-      if (funct3 == 3'b000) aluOp = ALU_ADD;      // ADD/SUB
-      else if (funct3 == 3'b111) aluOp = ALU_AND;  // AND
-      else if (funct3 == 3'b110) aluOp = ALU_OR;   // OR
-      else aluOp = ALU_ADD;
-    end else if (actualOpcode == 7'b0010011) begin  // I-type (ADDI, etc.)
-      aluOp = ALU_ADD;
+    if (actualOpcode == 7'b0110011) begin  // R-type integer
+      case (funct3)
+        3'b000:  aluOp = (f7bit30 == 1) ? ALU_SUB : ALU_ADD;
+        3'b001:  aluOp = ALU_SLL;
+        3'b010:  aluOp = ALU_SLT;
+        3'b011:  aluOp = ALU_SLTU;
+        3'b100:  aluOp = ALU_XOR;
+        3'b101:  aluOp = (f7bit30 == 1) ? ALU_SRA : ALU_SRL;
+        3'b110:  aluOp = ALU_OR;
+        default: aluOp = ALU_AND;                                 // 3'b111
+      endcase
+    end else if (actualOpcode == 7'b0010011) begin  // OP-IMM
+      case (funct3)
+        3'b000:  aluOp = ALU_ADD;                                 // ADDI
+        3'b001:  aluOp = ALU_SLL;                                 // SLLI
+        3'b010:  aluOp = ALU_SLT;                                 // SLTI
+        3'b011:  aluOp = ALU_SLTU;                                // SLTIU
+        3'b100:  aluOp = ALU_XOR;                                 // XORI
+        3'b101:  aluOp = (f7bit30 == 1) ? ALU_SRA : ALU_SRL;      // SRAI / SRLI
+        3'b110:  aluOp = ALU_OR;                                  // ORI
+        default: aluOp = ALU_AND;                                 // 3'b111  ANDI
+      endcase
+    end else if (actualOpcode == 7'b0110111) begin  // LUI
+      aluOp = ALU_LUI;
     end else if (actualOpcode == 7'b0000011) begin  // LOAD (LW)
       aluOp = ALU_LW;
     end else if (actualOpcode == 7'b0100011) begin  // STORE (SW)
@@ -72,7 +97,13 @@ package Common;
       else if (funct3 == 3'b001) aluOp = ALU_BNE;
       else if (funct3 == 3'b100) aluOp = ALU_BLT;
       else if (funct3 == 3'b101) aluOp = ALU_BGE;
+      else if (funct3 == 3'b110) aluOp = ALU_BLTU;
+      else if (funct3 == 3'b111) aluOp = ALU_BGEU;
       else aluOp = ALU_BEQ;
+    end else if (actualOpcode == 7'b1101111) begin  // JAL  (J-type)
+      aluOp = ALU_JAL;
+    end else if (actualOpcode == 7'b1100111) begin  // JALR (I-type)
+      aluOp = ALU_JALR;
     end else begin
       aluOp = ALU_ADD;  // Default
     end
@@ -80,9 +111,15 @@ package Common;
     Bit#(32) imm = 0;
     RegIndex rs2Field = 0;
     
-    if (actualOpcode == 7'b0010011) begin  // I-type immediate (ADDI, etc)
-      imm = signExtend(instr[31:20]);
-      rs2Field = 0; 
+    if (actualOpcode == 7'b0010011) begin  // OP-IMM
+      if (funct3 == 3'b001 || funct3 == 3'b101)
+        imm = zeroExtend(instr[24:20]);      // SLLI/SRLI/SRAI: 5-bit shamt (RV32)
+      else
+        imm = signExtend(instr[31:20]);      // ADDI/SLTI/SLTIU/XORI/ORI/ANDI
+      rs2Field = 0;
+    end else if (actualOpcode == 7'b0110111) begin  // LUI - U-type immediate
+      imm = {instr[31:12], 12'd0};
+      rs2Field = 0;
     end else if (actualOpcode == 7'b0000011) begin  // LOAD (LW) - I-type
       imm = signExtend(instr[31:20]);
       rs2Field = 0;
@@ -95,16 +132,27 @@ package Common;
       Bit#(13) branchImm = {instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};
       imm = signExtend13(branchImm);
       rs2Field = instr[24:20];  // B-type uses rs2
+    end else if (actualOpcode == 7'b1101111) begin  // JAL - J-type immediate (21-bit, LSB 0)
+      Bit#(21) jalImm = {instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
+      imm = signExtend21(jalImm);
+      rs2Field = 0;
+    end else if (actualOpcode == 7'b1100111) begin  // JALR - I-type immediate
+      imm = signExtend(instr[31:20]);
+      rs2Field = 0;
     end else begin
       rs2Field = instr[24:20];  // R-type and other types use rs2
     end
 
     RegIndex rdField = (actualOpcode == 7'b1100011) ? 0 : instr[11:7];
+    // JAL and LUI put immediate bits in the [19:15] field, not a source register:
+    // force rs1=0 so they do not wait on a phantom operand in the reservation station.
+    RegIndex rs1Field = ((actualOpcode == 7'b1101111) || (actualOpcode == 7'b0110111))
+                        ? 0 : instr[19:15];
 
     return Decoded {
       opcode: aluOp,
       rd: rdField,
-      rs1: instr[19:15],
+      rs1: rs1Field,
       rs2: rs2Field,
       funct3: funct3,
       funct7: 0,
@@ -159,7 +207,23 @@ package Common;
   endfunction
 
   function Bool isBranchOp(ALUOp op);
-    return (op == ALU_BEQ || op == ALU_BNE || op == ALU_BLT || op == ALU_BGE);
+    return (op == ALU_BEQ || op == ALU_BNE || op == ALU_BLT || op == ALU_BGE
+            || op == ALU_BLTU || op == ALU_BGEU);
+  endfunction
+
+  function Bool isJumpOp(ALUOp op);
+    return (op == ALU_JAL || op == ALU_JALR);
+  endfunction
+
+  // Anything that resolves through the branch checkpoint/recovery path.
+  function Bool isControlFlowOp(ALUOp op);
+    return isBranchOp(op) || isJumpOp(op);
+  endfunction
+
+  // Same test on a raw fetched word (opcode = BRANCH / JAL / JALR).
+  function Bool isControlFlowInstr(Instruction instr);
+    let opc = instr[6:0];
+    return (opc == 7'b1100011) || (opc == 7'b1101111) || (opc == 7'b1100111);
   endfunction
   
   function Bool isLoadOp(ALUOp op);

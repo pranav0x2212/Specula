@@ -3,127 +3,134 @@ package LSU;
   import Common::*;
   import Vector::*;
 
-  typedef 8 StoreBufferSize;
+  typedef 8   SQ_SIZE;
   typedef 256 MemSize;
 
+  typedef UInt#(TLog#(SQ_SIZE)) SQIdx;
+
   typedef struct {
-    Bit#(32) addr;
-    Bit#(32) data;
     ROBTag robTag;
-    Bool valid;
-  } StoreBufferEntry deriving (Bits, FShow);
+    Bool   addrReady;
+    Addr   addr;
+    Bool   dataReady;
+    Data   data;
+  } SQEntry deriving (Bits, FShow);
 
   interface IfcLSU;
-    method ActionValue#(Bit#(32)) load(Bit#(32) addr);
-    method Action enqStore(Bit#(32) addr, Bit#(32) data, ROBTag robTag);
-    method Action commitStore(ROBTag robTag);
-    method Action directStore(Bit#(32) addr, Bit#(32) data);  
-    method Bool storeBufferFull();
+    method ActionValue#(Data) load(Addr addr);         
+    method Action sqAllocate(ROBTag robTag);            
+    method Action sqExecStore(ROBTag robTag, Addr addr, Data data);  
+    method Action storeToMem(Addr addr, Data data);     
+    method Action sqPop();                              
+    method Bool   sqOlderStorePending(ROBTag loadTag, ROBTag headTag); 
+    method Maybe#(Data) sqForward(Addr addr, ROBTag loadTag, ROBTag headTag); 
+    method Action sqFlush();                            
+    method Bool   sqEmpty();
+    method Bool   sqNotFull();
   endinterface
 
   module mkLSU(IfcLSU);
 
-    
-    Vector#(StoreBufferSize, Reg#(StoreBufferEntry)) storeBuffer <- replicateM(mkReg(StoreBufferEntry{
-      addr: 0, data: 0, robTag: ROBTag{idx: 0}, valid: False
-    }));
-    
-    Reg#(UInt#(4)) sbCount <- mkReg(0);
+    Vector#(MemSize, Reg#(Data)) memory <- replicateM(mkReg(0));
 
-    
-    Vector#(MemSize, Reg#(Bit#(32))) memory <- replicateM(mkReg(0));
+    Vector#(SQ_SIZE, Reg#(SQEntry)) sq <- replicateM(mkRegU);
+    Vector#(SQ_SIZE, Reg#(Bool))    sqValid <- replicateM(mkReg(False));
+    Reg#(SQIdx)      sqHead  <- mkReg(0);
+    Reg#(SQIdx)      sqTail  <- mkReg(0);
+    Reg#(UInt#(TLog#(TAdd#(SQ_SIZE, 1)))) sqCount <- mkReg(0);
 
-    function Maybe#(UInt#(4)) findFreeSlot();
-      Maybe#(UInt#(4)) result = tagged Invalid;
-      for (Integer i = 0; i < valueOf(StoreBufferSize); i = i + 1) begin
-        if (!storeBuffer[i].valid) begin
-          result = tagged Valid fromInteger(i);
-        end
-      end
-      return result;
+    function UInt#(32) wordIndex(Addr a);
+      UInt#(32) au = unpack(a);
+      return au >> 2;
     endfunction
 
-    
-    function Maybe#(Bit#(32)) queryStoreBuffer(Bit#(32) addr);
-      Maybe#(Bit#(32)) result = tagged Invalid;
-      for (Integer i = 0; i < valueOf(StoreBufferSize); i = i + 1) begin
-        if (storeBuffer[i].valid && storeBuffer[i].addr == addr) begin
-          result = tagged Valid storeBuffer[i].data;
-        end
-      end
-      return result;
+    function Bool inBounds(Addr a);
+      return (wordIndex(a) < fromInteger(valueOf(MemSize)));
     endfunction
 
-    method ActionValue#(Bit#(32)) load(Bit#(32) addr);
-      Bit#(32) loadVal = 0;
-      Maybe#(Bit#(32)) fwdVal = queryStoreBuffer(addr);
-      
-      if (fwdVal matches tagged Valid .val) begin
-        loadVal = val;
-        $display("[LSU] Load from addr=%h FORWARDED from store buffer: data=%h", addr, val);
-      end else begin
-        UInt#(32) addrUInt = unpack(addr);
-        UInt#(9) memIdx = truncate(addrUInt >> 2);
-        if (memIdx < fromInteger(valueOf(MemSize))) begin
-          loadVal = memory[memIdx];
-          $display("[LSU] Load from addr=%h from memory[%0d]: data=%h", addr, memIdx, loadVal);
-        end else begin
-          $display("[LSU] Load from addr=%h OUT OF BOUNDS", addr);
-        end
-      end
-      
-      return loadVal;
+    function UInt#(TLog#(MemSize)) memIndex(Addr a);
+      return truncate(wordIndex(a));
+    endfunction
+
+    method ActionValue#(Data) load(Addr addr);
+      Data v = 0;
+      if (inBounds(addr)) begin
+        v = memory[memIndex(addr)];
+        $display("[LSU] Load addr=%h from memory[%0d] = %h", addr, memIndex(addr), v);
+      end else
+        $display("[LSU] Load addr=%h OUT OF BOUNDS", addr);
+      return v;
     endmethod
 
-    method Action enqStore(Bit#(32) addr, Bit#(32) data, ROBTag robTag);
-      Maybe#(UInt#(4)) slot = findFreeSlot();
-      
-      if (slot matches tagged Valid .idx) begin
-        storeBuffer[idx] <= StoreBufferEntry {
-          addr: addr,
-          data: data,
-          robTag: robTag,
-          valid: True
-        };
-        sbCount <= sbCount + 1;
-        $display("[LSU] Enqueued store: robTag=%0d addr=%h data=%h to slot %0d", robTag.idx, addr, data, idx);
-      end else begin
-        $display("[LSU] ERROR: Store buffer full for robTag=%0d", robTag.idx);
+    method Action sqAllocate(ROBTag robTag);
+      sq[sqTail] <= SQEntry { robTag: robTag, addrReady: False, addr: 0, dataReady: False, data: 0 };
+      sqValid[sqTail] <= True;
+      sqTail  <= sqTail + 1;
+      sqCount <= sqCount + 1;
+      $display("[SQ] alloc rob=%0d in slot %0d", robTag.idx, sqTail);
+    endmethod
+
+    method Action sqExecStore(ROBTag robTag, Addr addr, Data data);
+      for (Integer i = 0; i < valueOf(SQ_SIZE); i = i + 1) begin
+        if (sqValid[i] && sq[i].robTag.idx == robTag.idx) begin
+          let e = sq[i];
+          e.addr = addr; e.data = data;
+          e.addrReady = True; e.dataReady = True;
+          sq[i] <= e;
+          $display("[SQ] exec rob=%0d slot %0d addr=%h data=%h", robTag.idx, i, addr, data);
+        end
       end
     endmethod
 
-    method Action commitStore(ROBTag robTag);
-      for (Integer i = 0; i < valueOf(StoreBufferSize); i = i + 1) begin
-        if (storeBuffer[i].valid && storeBuffer[i].robTag.idx == robTag.idx) begin
-          UInt#(32) addrUInt = unpack(storeBuffer[i].addr);
-          UInt#(9) memIdx = truncate(addrUInt >> 2);
-          if (memIdx < fromInteger(valueOf(MemSize))) begin
-            memory[memIdx] <= storeBuffer[i].data;
-            $display("[LSU] Committed store: robTag=%0d addr=%h <- data=%h to memory[%0d]", 
-                     robTag.idx, storeBuffer[i].addr, storeBuffer[i].data, memIdx);
-          end else begin
-            $display("[LSU] ERROR: Store to out-of-bounds addr=%h", storeBuffer[i].addr);
+    method Action storeToMem(Addr addr, Data data);
+      if (inBounds(addr)) begin
+        memory[memIndex(addr)] <= data;
+        $display("[LSU] Committed store addr=%h <- data=%h to memory[%0d]", addr, data, memIndex(addr));
+      end else
+        $display("[LSU] Committed store addr=%h OUT OF BOUNDS (dropped)", addr);
+    endmethod
+
+    method Action sqPop();
+      sqValid[sqHead] <= False;
+      sqHead  <= sqHead + 1;
+      sqCount <= sqCount - 1;
+    endmethod
+
+    method Bool sqOlderStorePending(ROBTag loadTag, ROBTag headTag);
+      Bool pend = False;
+      for (Integer i = 0; i < valueOf(SQ_SIZE); i = i + 1)
+        if (sqValid[i] && isOlderRob(sq[i].robTag, loadTag, headTag) && !sq[i].addrReady)
+          pend = True;
+      return pend;
+    endmethod
+
+    method Maybe#(Data) sqForward(Addr addr, ROBTag loadTag, ROBTag headTag);
+      Maybe#(Data) res = tagged Invalid;
+      UInt#(6) bestAge = 0;
+      for (Integer i = 0; i < valueOf(SQ_SIZE); i = i + 1) begin
+        if (sqValid[i] && isOlderRob(sq[i].robTag, loadTag, headTag)
+            && sq[i].addrReady && sq[i].addr == addr) begin
+          UInt#(6) age = sq[i].robTag.idx - headTag.idx;   
+          if (!isValid(res) || age >= bestAge) begin
+            res = tagged Valid sq[i].data;                 
+            bestAge = age;
           end
-          storeBuffer[i].valid <= False;
-          sbCount <= sbCount - 1;
         end
       end
+      return res;
     endmethod
 
-    method Bool storeBufferFull();
-      return (sbCount >= fromInteger(valueOf(StoreBufferSize)));
+    method Action sqFlush();
+      for (Integer i = 0; i < valueOf(SQ_SIZE); i = i + 1)
+        sqValid[i] <= False;
+      sqHead  <= 0;
+      sqTail  <= 0;
+      sqCount <= 0;
+      $display("[SQ] flushed");
     endmethod
 
-    method Action directStore(Bit#(32) addr, Bit#(32) data);
-      UInt#(32) addrUInt = unpack(addr);
-      UInt#(9) memIdx = truncate(addrUInt >> 2);
-      if (memIdx < fromInteger(valueOf(MemSize))) begin
-        memory[memIdx] <= data;
-        $display("[LSU] Direct store: addr=%h <- data=%h to memory[%0d]", addr, data, memIdx);
-      end else begin
-        $display("[LSU] ERROR: Store to out-of-bounds addr=%h", addr);
-      end
-    endmethod
+    method Bool sqEmpty()   = (sqCount == 0);
+    method Bool sqNotFull() = (sqCount < fromInteger(valueOf(SQ_SIZE)));
 
   endmodule
 

@@ -11,21 +11,6 @@ BSC      := bsc
 BSC_PATH := +:src:src/common:src/frontend:src/backend:sw
 BSC_FLAGS := +RTS -K512M -RTS -sim -p $(BSC_PATH) -bdir $(OUT_DIR) -info-dir $(OUT_DIR)
 
-# ---------- TEST PROGRAM / INSTRUCTION IMAGE (M1/M2/M3) -----------
-#
-# sw/start.S + sw/test.c  --(gcc, sw/link.ld)-->  build/test.elf
-#   --(objcopy)--> build/test.bin
-#   --(od/awk)---> program.hex           one 32-bit word per line, program order,
-#                                        NOP-padded to IMEM_WORDS entries
-#   --(printf)---> sw/ProgramImage.bsv   progWords / imemWords for the core
-#
-# program.hex is read at run time by mkRegFileLoad, relative to the directory
-# the simulator is launched from (the repo root), so it lives there.
-#
-# M2: the program terminates by storing to the tohost MMIO address; the NOP
-#     padding is only a safety runway so fetch never reads past the image.
-# M3: sw/start.S sets sp then `jal main`; sw/link.ld puts _start at 0x0.
-
 IMEM_WORDS ?= 256
 NOP        := 00000013
 

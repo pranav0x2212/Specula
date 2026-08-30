@@ -1,4 +1,3 @@
-/* Specula milestone-3 link script: entry at 0x0, startup shim first. */
 ENTRY(_start)
 
 SECTIONS

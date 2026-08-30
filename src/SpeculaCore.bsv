@@ -37,13 +37,6 @@ package SpeculaCore;
 
     FIFOF#(MemResult) memResultQ <- mkSizedFIFOF(4);
 
-    // M2: normal program completion is an explicit store to `tohostAddr`
-    // (see doCommit) -- a simulation-only MMIO sink. A store of 1 means PASS,
-    // any other value means FAIL; either way the simulator finishes.
-    //
-    // maxPC is now only a *safety* bound: the instruction image is NOP-padded
-    // to `imemWords`, so if a buggy program never writes tohost, fetch simply
-    // runs off the padding and the existing halt/terminate path stops the run.
     Addr      tohostAddr = 32'h00000700;
     Bit#(32)  maxPC      = fromInteger(imemWords) * 4;
 
@@ -57,17 +50,6 @@ package SpeculaCore;
     Reg#(Bit#(32))      recoverPC        <- mkReg(0);
     Reg#(Bool)          recoveryComplete <- mkReg(False);
 
-    // M3: a control-flow instruction is live somewhere between fetch and
-    // resolution. `brPredNextPC` is a single shared register captured at fetch
-    // and read at writeback, so at most one control-flow instruction may be in
-    // that window at a time. Set in doFetch, cleared at branch/jump writeback
-    // and on recovery.  (brOutstanding is set later, at dispatch, so it cannot
-    // guard fetch by itself.)
-    //
-    // Port map: doFetch reads+writes [0]; doWriteback clears [1]; doRecover
-    // clears [2]. doFetch reading the lowest port means it does not take an
-    // in-cycle ordering dependency on the clearers (it is gated by
-    // !flushPending anyway), which keeps the rule schedule acyclic.
     Array#(Reg#(Bool))  cfInFlight       <- mkCReg(3, False);
 
     FIFOF#(Tuple2#(Bit#(32), Instruction)) fetchedQ <- mkFIFOF();
@@ -83,10 +65,6 @@ package SpeculaCore;
       Bool isCondBranch = (instr[6:0] == 7'b1100011);
       Bool isCF         = isControlFlowInstr(instr);
 
-      // Only conditional branches are predicted. Jumps (JAL/JALR) always take
-      // the recovery redirect at resolution, so the frontend keeps going
-      // sequentially and the captured prediction is pc+4 -> guaranteed
-      // "mispredict" -> deterministic redirect.
       Bit#(32) predNext = (isCondBranch && predTaken) ? pr.targetAddr : (pc + 4);
 
       if (isCF) begin
@@ -234,8 +212,6 @@ package SpeculaCore;
             Bool src2Ready = prf.isReady(src2PhysReg);
 
             Bit#(7) actualOpcode = r.instr.raw[6:0];
-            // OP-IMM (immediate ALU) and LUI (rd <- immediate) take operand b
-            // from the decoded immediate; everything else uses rs2.
             Bool shouldUseImm = (actualOpcode == 7'b0010011) || (actualOpcode == 7'b0110111);
 
             let rsEntry = RSEntry {
@@ -405,7 +381,7 @@ package SpeculaCore;
           $display("[MEMQ] load rob=%0d issued: addr=%h result=%h", e.robTag.idx, addr, result);
         end else begin
           Data sdata = fromMaybe(0, prf.read(e.sdata));
-          lsu.sqExecStore(e.robTag, addr, sdata);   // fill store queue for forwarding
+          lsu.sqExecStore(e.robTag, addr, sdata);   
           memResultQ.enq(MemResult { isLoad: False, dest: 0, data: sdata, addr: addr, robTag: e.robTag });
           $display("[MEMQ] store rob=%0d issued: addr=%h data=%h", e.robTag.idx, addr, sdata);
         end
@@ -420,8 +396,6 @@ package SpeculaCore;
         Bit#(32) actualNextPC = aluResp.actualTaken ? aluResp.actualTarget : (aluResp.pc + 4);
         Bool mispred = (actualNextPC != brPredNextPC[0]);
 
-        // For JAL/JALR, aluResp.result is the link value (pc+4). For a
-        // conditional branch it is 0 and dest is 0, so the writes below no-op.
         rob.completeEntry(aluResp.robTag, aluResp.result, 0, mispred, actualNextPC);
 
         if (aluResp.dest != 0) begin
@@ -430,7 +404,6 @@ package SpeculaCore;
         end
         rs.wakeup(aluResp.dest);
 
-        // Only real branches train the predictor; jumps are not predicted.
         if (!aluResp.isJump)
           bp.update(BranchUpdate {
             pc:         aluResp.pc,

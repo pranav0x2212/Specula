@@ -14,12 +14,12 @@ package Common;
     ALU_ADD, ALU_SUB, ALU_AND, ALU_OR,
     ALU_BEQ, ALU_BNE, ALU_BLT, ALU_BGE,
     ALU_LW, ALU_SW,
-    ALU_JAL, ALU_JALR,         // M3: unconditional jumps (branch-like, always redirect)
-    ALU_SLL, ALU_SRL, ALU_SRA, // M4: shifts (amount = operand[4:0])
-    ALU_SLT, ALU_SLTU,         // M4: set-less-than -> 0/1
-    ALU_XOR,                   // M4
-    ALU_LUI,                   // M4: rd <- immediate (no source registers)
-    ALU_BLTU, ALU_BGEU         // M4: unsigned conditional branches
+    ALU_JAL, ALU_JALR,         
+    ALU_SLL, ALU_SRL, ALU_SRA, 
+    ALU_SLT, ALU_SLTU,        
+    ALU_XOR,                  
+    ALU_LUI,                  
+    ALU_BLTU, ALU_BGEU         
   } ALUOp deriving (Bits, Eq, FShow);
 
   typedef struct {
@@ -52,17 +52,12 @@ package Common;
   function ZERO_TAG zeroTag();
     return 0;
   endfunction
-  
-  // M1: the instruction stream is no longer a hard-coded ROM. It is an
-  // external image (`program.hex`) loaded by mkFetchUnit. See src/frontend/
-  // FetchUnit.bsv and the Makefile `program.hex` / `sw/ProgramImage.bsv` rules.
 
   function Decoded decode(Instruction instr, Bit#(32) pc);
     Bit#(7) actualOpcode = instr[6:0];
     Bit#(3) funct3 = instr[14:12];
 
-    Bit#(1) f7bit30 = instr[30];  // distinguishes ADD/SUB and SRL/SRA (SRLI/SRAI)
-
+    Bit#(1) f7bit30 = instr[30];  
     ALUOp aluOp;
     if (actualOpcode == 7'b0110011) begin  // R-type integer
       case (funct3)
@@ -144,8 +139,7 @@ package Common;
     end
 
     RegIndex rdField = (actualOpcode == 7'b1100011) ? 0 : instr[11:7];
-    // JAL and LUI put immediate bits in the [19:15] field, not a source register:
-    // force rs1=0 so they do not wait on a phantom operand in the reservation station.
+
     RegIndex rs1Field = ((actualOpcode == 7'b1101111) || (actualOpcode == 7'b0110111))
                         ? 0 : instr[19:15];
 
@@ -215,12 +209,10 @@ package Common;
     return (op == ALU_JAL || op == ALU_JALR);
   endfunction
 
-  // Anything that resolves through the branch checkpoint/recovery path.
   function Bool isControlFlowOp(ALUOp op);
     return isBranchOp(op) || isJumpOp(op);
   endfunction
 
-  // Same test on a raw fetched word (opcode = BRANCH / JAL / JALR).
   function Bool isControlFlowInstr(Instruction instr);
     let opc = instr[6:0];
     return (opc == 7'b1100011) || (opc == 7'b1101111) || (opc == 7'b1100111);

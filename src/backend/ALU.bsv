@@ -23,8 +23,8 @@ package ALU;
     Data result;
     PhysRegTag dest;
     ROBTag robTag;
-    Bool isBranch;      // resolves through the branch/recovery path (branches + jumps)
-    Bool isJump;        // JAL/JALR: unconditional, writes a link reg, not predicted
+    Bool isBranch;      
+    Bool isJump;       
     Bool actualTaken;
     Data actualTarget;
     Bit#(32) pc;
@@ -68,21 +68,18 @@ package ALU;
         ALU_AND: res = r.a & r.b;
         ALU_OR: res = r.a | r.b;
         ALU_XOR: res = r.a ^ r.b;
-        // Shifts: RV32 uses only the low 5 bits of the amount (register or shamt).
         ALU_SLL: res = r.a << r.b[4:0];
         ALU_SRL: res = r.a >> r.b[4:0];
         ALU_SRA: res = signedShiftRight(r.a, r.b[4:0]);
         ALU_SLT:  res = signedLT(r.a, r.b) ? 32'd1 : 32'd0;
         ALU_SLTU: res = (r.a < r.b)        ? 32'd1 : 32'd0;
-        ALU_LUI: res = r.b;   // b carries the U-immediate (useImmediate)
+        ALU_LUI: res = r.b;   
         ALU_JAL: begin
-          // rd <- pc+4 ; redirect to pc + J-immediate
           isBranch = True; isJump = True; actualTaken = True;
           actualTarget = r.pc + r.branchOffset;
           res = r.pc + 4;
         end
         ALU_JALR: begin
-          // rd <- pc+4 ; redirect to (rs1 + I-immediate) & ~1
           isBranch = True; isJump = True; actualTaken = True;
           actualTarget = (r.a + r.branchOffset) & 32'hFFFFFFFE;
           res = r.pc + 4;

@@ -4,17 +4,6 @@ package FetchUnit;
   import ProgramImage::*;
   import RegFile::*;
 
-  // Instruction memory for Specula.
-  //
-  // M1: the instruction stream is an externally generated image (`program.hex`,
-  // one 32-bit word per line, program order) produced from `sw/test.c` by the
-  // Makefile. The compiled program occupies the first `progWords` entries; the
-  // Makefile pads the file with NOPs out to `imemWords` so fetch past the end
-  // of the program lands on NOPs rather than out-of-bounds reads. Both counts
-  // come from the generated `ProgramImage` package.
-  //
-  // The word at byte address `pc` lives at `imem[pc >> 2]`.
-
   interface IfcFetchUnit;
     method Action start(Bit#(32) pc);
     method Instruction getInstr(Bit#(32) pc);

@@ -20,13 +20,15 @@ package Common;
     ALU_ADD, ALU_SUB, ALU_AND, ALU_OR,
     ALU_BEQ, ALU_BNE, ALU_BLT, ALU_BGE,
     ALU_LW, ALU_SW,
-    ALU_JAL, ALU_JALR,         
-    ALU_SLL, ALU_SRL, ALU_SRA, 
-    ALU_SLT, ALU_SLTU,        
-    ALU_XOR,                  
-    ALU_LUI,                  
+    ALU_JAL, ALU_JALR,
+    ALU_SLL, ALU_SRL, ALU_SRA,
+    ALU_SLT, ALU_SLTU,
+    ALU_XOR,
+    ALU_LUI,
     ALU_AUIPC, ALU_NOP,
-    ALU_BLTU, ALU_BGEU         
+    ALU_BLTU, ALU_BGEU,
+    ALU_MUL, ALU_DIVU, ALU_REMU,
+    ALU_CSR, ALU_MRET
   } ALUOp deriving (Bits, Eq, FShow);
 
   typedef struct {
@@ -67,17 +69,26 @@ package Common;
 
     Bit#(1) f7bit30 = instr[30];  
     ALUOp aluOp;
-    if (actualOpcode == 7'b0110011) begin  // R-type integer
-      case (funct3)
-        3'b000:  aluOp = (f7bit30 == 1) ? ALU_SUB : ALU_ADD;
-        3'b001:  aluOp = ALU_SLL;
-        3'b010:  aluOp = ALU_SLT;
-        3'b011:  aluOp = ALU_SLTU;
-        3'b100:  aluOp = ALU_XOR;
-        3'b101:  aluOp = (f7bit30 == 1) ? ALU_SRA : ALU_SRL;
-        3'b110:  aluOp = ALU_OR;
-        default: aluOp = ALU_AND;                                 // 3'b111
-      endcase
+    if (actualOpcode == 7'b0110011) begin  // R-type integer / RV32M
+      if (instr[31:25] == 7'b0000001) begin  // M8: M-extension (funct7 = 0000001)
+        case (funct3)
+          3'b000:  aluOp = ALU_MUL;
+          3'b101:  aluOp = ALU_DIVU;
+          3'b111:  aluOp = ALU_REMU;
+          default: aluOp = ALU_NOP;  // MULH/MULHSU/MULHU/DIV/REM: unused by xv6, not implemented
+        endcase
+      end else begin
+        case (funct3)
+          3'b000:  aluOp = (f7bit30 == 1) ? ALU_SUB : ALU_ADD;
+          3'b001:  aluOp = ALU_SLL;
+          3'b010:  aluOp = ALU_SLT;
+          3'b011:  aluOp = ALU_SLTU;
+          3'b100:  aluOp = ALU_XOR;
+          3'b101:  aluOp = (f7bit30 == 1) ? ALU_SRA : ALU_SRL;
+          3'b110:  aluOp = ALU_OR;
+          default: aluOp = ALU_AND;                                 // 3'b111
+        endcase
+      end
     end else if (actualOpcode == 7'b0010011) begin  // OP-IMM
       case (funct3)
         3'b000:  aluOp = ALU_ADD;                                 // ADDI
@@ -111,8 +122,12 @@ package Common;
       aluOp = ALU_JAL;
     end else if (actualOpcode == 7'b1100111) begin  // JALR (I-type)
       aluOp = ALU_JALR;
+    end else if (actualOpcode == 7'b1110011 && funct3[1:0] != 2'b00) begin
+      aluOp = ALU_CSR;   // SYSTEM Zicsr: funct3 001/010/011/101/110/111 = CSRRW/S/C[I]
+    end else if (actualOpcode == 7'b1110011 && funct3 == 3'b000 && instr[31:20] == 12'h302) begin
+      aluOp = ALU_MRET;  // SYSTEM: MRET
     end else begin
-      aluOp = ALU_ADD;  // Default
+      aluOp = ALU_ADD;
     end
     
     Bit#(32) imm = 0;
@@ -151,6 +166,9 @@ package Common;
       rs2Field = 0;
     end else if (actualOpcode == 7'b1100111) begin  // JALR - I-type immediate
       imm = signExtend(instr[31:20]);
+      rs2Field = 0;
+    end else if (actualOpcode == 7'b1110011) begin  // SYSTEM - carry CSR address in imm[11:0]
+      imm = zeroExtend(instr[31:20]);
       rs2Field = 0;
     end else begin
       rs2Field = instr[24:20];  // R-type and other types use rs2
@@ -235,6 +253,26 @@ package Common;
   function Bool isControlFlowInstr(Instruction instr);
     let opc = instr[6:0];
     return (opc == 7'b1100011) || (opc == 7'b1101111) || (opc == 7'b1100111);
+  endfunction
+
+  function Bool isCsrOp(ALUOp op);
+    return (op == ALU_CSR);
+  endfunction
+
+  function Bool isMretOp(ALUOp op);
+    return (op == ALU_MRET);
+  endfunction
+
+  function Bool isSerializingOp(ALUOp op);
+    return (op == ALU_CSR) || (op == ALU_MRET);
+  endfunction
+
+  function Bool isSerializingInstr(Instruction instr);
+    Bit#(7) opc = instr[6:0];
+    Bit#(3) f3  = instr[14:12];
+    Bool isCsr  = (f3[1:0] != 2'b00);
+    Bool isMret = (f3 == 3'b000) && (instr[31:20] == 12'h302);
+    return (opc == 7'b1110011) && (isCsr || isMret);
   endfunction
   
   function Bool isLoadOp(ALUOp op);

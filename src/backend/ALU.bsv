@@ -78,6 +78,9 @@ package ALU;
         ALU_LUI: res = r.b;
         ALU_AUIPC: res = r.pc + r.branchOffset;
         ALU_NOP: res = 32'd0;
+        ALU_MUL:  res = r.a * r.b;
+        ALU_DIVU: res = (r.b == 0) ? 32'hFFFFFFFF : (r.a / r.b);
+        ALU_REMU: res = (r.b == 0) ? r.a : (r.a % r.b);
         ALU_JAL: begin
           isBranch = True; isJump = True; actualTaken = True;
           actualTarget = r.pc + r.branchOffset;

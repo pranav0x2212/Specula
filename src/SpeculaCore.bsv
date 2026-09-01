@@ -13,16 +13,29 @@ package SpeculaCore;
   import LSU::*;
   import MemQueue::*;
   import BranchPredictor::*;
+  import CSRFile::*;
   import FIFOF::*;
   import Vector::*;
 
   typedef struct {
     Bool       isLoad;
     PhysRegTag dest;
-    Data       data;   
-    Addr       addr;   
+    Data       data;
+    Addr       addr;
     ROBTag     robTag;
   } MemResult deriving (Bits, FShow);
+
+  typedef struct {
+    Bool       isMret;
+    Bit#(12)   csrAddr;
+    Bit#(3)    funct3;
+    Bit#(5)    rs1Zimm;
+    Bool       isImm;
+    PhysRegTag srcTag;
+    PhysRegTag destTag;
+    RegIndex   rd;
+    ROBTag     robTag;
+  } SysMeta deriving (Bits, FShow);
 
   module mkSpeculaCore(Empty);
     Memory_IFC mem <- mkMemory;
@@ -37,6 +50,12 @@ package SpeculaCore;
     IfcLSU lsu <- mkLSU(mem);
     MemQueue_IFC memQ <- mkMemQueue;
     BranchPredictor_IFC bp <- mkBranchPredictor;
+
+    CSRFile_IFC     csr        <- mkCSRFile;
+    Reg#(Bit#(2))   priv       <- mkReg(2'b11);   // reset in M-mode
+    Reg#(Bool)      serInFlight <- mkReg(False);  // set at fetch, cleared at commit; freezes fetch
+    Reg#(Bool)      sysArmed    <- mkReg(False);  // set at dispatch, cleared at commit; gates the commit handler
+    Reg#(SysMeta)   sysMeta     <- mkRegU;
 
     FIFOF#(MemResult) memResultQ <- mkSizedFIFOF(4);
     Addr      tohostAddr = 32'h10000000;
@@ -58,7 +77,7 @@ package SpeculaCore;
     FIFOF#(Tuple3#(Bit#(32), Decoded, Bit#(32)))     decodedQ <- mkFIFOF();
     FIFOF#(RenamedInstr) renamedInstrQ <- mkSizedFIFOF(8);
 
-    rule doFetch (!halted && !flushPending && pc < maxPC
+    rule doFetch (!halted && !flushPending && !serInFlight && pc < maxPC
                   && !(cfInFlight[0] && isControlFlowInstr(fetch.at(pc).instr)));
       let fs = fetch.at(pc);
       let instr = fs.instr;
@@ -75,6 +94,11 @@ package SpeculaCore;
         cfInFlight[0]   <= True;
         $display("[FETCH] control-flow @ %h (%s): predicted-next PC = %h",
                  pc, isCondBranch ? "branch" : "jump", predNext);
+      end
+
+      if (isSerializingInstr(instr)) begin
+        serInFlight <= True;
+        $display("[FETCH] SYSTEM @ %h : serializing - fetch frozen until retire", pc);
       end
 
       fetch.start(pc);
@@ -124,6 +148,8 @@ package SpeculaCore;
       halted <= False;
       brOutstanding[1] <= False;
       cfInFlight[2] <= False;
+      serInFlight <= False;
+      sysArmed    <= False;
       recoveryComplete <= True;
     endrule
 
@@ -135,15 +161,60 @@ package SpeculaCore;
 
     rule doDispatch (renamedInstrQ.notEmpty && !flushPending
                      && rob.canAllocate
-                     && (isMemoryOp(renamedInstrQ.first.instr.opcode)
-                          ? (memQ.notFull && (isLoadOp(renamedInstrQ.first.instr.opcode) || lsu.sqNotFull))
-                          : rs.notFull)
+                     && (isSerializingOp(renamedInstrQ.first.instr.opcode)
+                          ? True
+                          : (isMemoryOp(renamedInstrQ.first.instr.opcode)
+                               ? (memQ.notFull && (isLoadOp(renamedInstrQ.first.instr.opcode) || lsu.sqNotFull))
+                               : rs.notFull))
                      && !(isControlFlowOp(renamedInstrQ.first.instr.opcode) && brOutstanding[0]));
       let r = renamedInstrQ.first;
       Bool isMemoryOp = (r.instr.opcode == ALU_LW) || (r.instr.opcode == ALU_SW);
       Bool isLoad = (r.instr.opcode == ALU_LW);
 
-      if (isMemoryOp) begin
+      if (isSerializingOp(r.instr.opcode)) begin
+        Bool     isMretI   = isMretOp(r.instr.opcode);
+        Bit#(3)  f3        = r.instr.funct3;
+        Bool     isImmForm = (f3[2] == 1'b1);
+        Bit#(12) csrAddr   = truncate(r.instr.imm);
+        Bool     writesRd  = (!isMretI) && (r.instr.rd != 0);
+
+        PhysRegTag destTag = 0;
+        Maybe#(PhysRegTag) oldPhysDst = tagged Invalid;
+        Bool ok = True;
+        if (writesRd) begin
+          let ar <- rename.allocateDestReg(r.instr.rd);
+          match {.dt, .ot, .succ} = ar;
+          destTag = dt; oldPhysDst = ot; ok = succ;
+          if (succ) prf.clear(dt);
+        end
+
+        if (ok) begin
+          renamedInstrQ.deq;
+          PhysRegTag srcTag = rename.lookupMapping(r.instr.rs1);
+          let robTag <- rob.allocate(
+              (writesRd ? tagged Valid r.instr.rd : tagged Invalid),
+              (writesRd ? tagged Valid destTag    : tagged Invalid),
+              oldPhysDst,
+              False,   // isStore
+              True,    // startCompleted: no execution latency; ROB.commitHead needs the flag set
+              False,   // isBranch
+              3'b000);
+          sysMeta <= SysMeta {
+            isMret:  isMretI,
+            csrAddr: csrAddr,
+            funct3:  f3,
+            rs1Zimm: r.instr.rs1,
+            isImm:   isImmForm,
+            srcTag:  srcTag,
+            destTag: destTag,
+            rd:      r.instr.rd,
+            robTag:  robTag
+          };
+          sysArmed <= True;
+          $display("[DISPATCH] %s rob=%0d serialized: csr=%03h f3=%b imm=%0d rd=x%0d",
+                   isMretI ? "MRET" : "CSR", robTag.idx, csrAddr, f3, isImmForm, r.instr.rd);
+        end
+      end else if (isMemoryOp) begin
         PhysRegTag destTag = 0;
         Maybe#(PhysRegTag) oldPhysDst = tagged Invalid;
         Bool canDispatch = True;
@@ -269,7 +340,8 @@ package SpeculaCore;
       let maybeHead = rob.peekHead();
       if (maybeHead matches tagged Valid .headInfo) begin
         match {.tag, .entry} = headInfo;
-        if (entry.completed) begin
+        if (sysArmed && tag.idx == sysMeta.robTag.idx) begin
+        end else if (entry.completed) begin
           if (entry.isBranch) begin
             if (entry.mispredicted) begin
               $display("[COMMIT] branch rob=%0d MISPREDICTED -> trigger recovery, redirect PC = %h", tag.idx, entry.redirectPC);
@@ -299,6 +371,34 @@ package SpeculaCore;
           rob.commitHead(rename);
         end
       end
+    endrule
+    rule doCommitSys (!flushPending && serInFlight && sysArmed
+                      && rob.headTag.idx == sysMeta.robTag.idx);
+      if (sysMeta.isMret) begin
+        let mr <- csr.doMret();
+        $display("[COMMIT] MRET rob=%0d : pc %h -> %h, priv %b -> %b",
+                 sysMeta.robTag.idx, pc, mr.nextPC, priv, mr.nextPriv);
+        priv <= mr.nextPriv;
+        pc   <= mr.nextPC;
+      end else begin
+        Bit#(32) oldv = csr.csrRead(sysMeta.csrAddr);
+        Bit#(32) src  = sysMeta.isImm
+                          ? zeroExtend(sysMeta.rs1Zimm)
+                          : fromMaybe(0, prf.read(sysMeta.srcTag));
+        Bool     wen  = csrWriteEnabled(sysMeta.funct3, sysMeta.rs1Zimm);
+        Bit#(32) newv = csrNewValue(sysMeta.funct3, oldv, src);
+        if (wen) csr.csrWrite(sysMeta.csrAddr, newv);
+        if (sysMeta.rd != 0) begin
+          prf.write(sysMeta.destTag, oldv);
+          prf.markReady(sysMeta.destTag);
+          rs.wakeup(sysMeta.destTag);
+        end
+        $display("[COMMIT] CSR rob=%0d : addr=%03h old=%h src=%h new=%h wen=%b rd=x%0d",
+                 sysMeta.robTag.idx, sysMeta.csrAddr, oldv, src, newv, wen, sysMeta.rd);
+      end
+      rob.commitHead(rename);
+      sysArmed    <= False;
+      serInFlight <= False;
     endrule
 
     rule doExecute (rs.notEmpty && alu.notFull && !flushPending);
@@ -463,6 +563,10 @@ package SpeculaCore;
     (* descending_urgency = "doRecover, doDispatch, doCommit" *)
     (* descending_urgency = "doWriteback, doMemWriteback" *)
     (* descending_urgency = "doMemWriteback, doMemIssue" *)
+    (* descending_urgency = "doDispatch,     doCommitSys" *)
+    (* descending_urgency = "doWriteback,    doCommitSys" *)
+    (* descending_urgency = "doMemWriteback, doCommitSys" *)
+    (* descending_urgency = "doCommitSys,    doCommit"    *)
     rule doMemWriteback (memResultQ.notEmpty);
       let mr = memResultQ.first; memResultQ.deq;
       rob.completeEntry(mr.robTag, mr.data, mr.addr, False, 0);

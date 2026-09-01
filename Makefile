@@ -35,7 +35,7 @@ IMG_BSV  := sw/MemImage.bsv
 
 # ---------- TARGETS -----------
 
-.PHONY: all run image disasm clean rvctest
+.PHONY: all run image disasm clean rvctest csrtest
 
 all: $(OUT_DIR)/$(EXE)
 
@@ -46,6 +46,12 @@ rvctest: | $(OUT_DIR)
 	$(BSC) $(BSC_FLAGS) -u -g mkRVCExpandTest $(SRC_DIR)/frontend/RVCExpandTest.bsv
 	$(BSC) $(BSC_FLAGS) -e mkRVCExpandTest -o $(OUT_DIR)/rvctest
 	./$(OUT_DIR)/rvctest
+
+# M8: standalone machine-mode CSR-file bench (no program image needed).
+csrtest: | $(OUT_DIR)
+	$(BSC) $(BSC_FLAGS) -u -g mkCSRFileTest $(SRC_DIR)/backend/CSRFileTest.bsv
+	$(BSC) $(BSC_FLAGS) -e mkCSRFileTest -o $(OUT_DIR)/csrtest
+	./$(OUT_DIR)/csrtest
 
 $(ELF): $(SW_SRCS) $(SW_LD) | $(OUT_DIR)
 	@echo "[img] compiling $(SW_SRCS)"

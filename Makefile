@@ -11,31 +11,41 @@ BSC      := bsc
 BSC_PATH := +:src:src/common:src/frontend:src/backend:sw
 BSC_FLAGS := +RTS -K512M -RTS -sim -p $(BSC_PATH) -bdir $(OUT_DIR) -info-dir $(OUT_DIR)
 
-IMEM_WORDS ?= 256
-NOP        := 00000013
+MEM_WORDS ?= 65536
+ZERO      := 00000000
 
 RV_PREFIX  ?= riscv32-unknown-elf-
 RV_CC      := $(RV_PREFIX)gcc
 RV_OBJCOPY := $(RV_PREFIX)objcopy
 RV_OBJDUMP := $(RV_PREFIX)objdump
 
-RV_CFLAGS  := -march=rv32i -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding -O1
+# RV_ARCH = target ISA string. Default rv32i (M1-M7a). Use rv32ic for M7b tests.
+RV_ARCH    ?= rv32i
+RV_CFLAGS  := -march=$(RV_ARCH) -mabi=ilp32 -nostdlib -nostartfiles -ffreestanding -O1
 RV_LDFLAGS := -Wl,-T,sw/link.ld
 
-SW_SRCS  := sw/start.S sw/test.c
+# TEST: source under test. Override e.g.  make TEST=sw/tests/m5.c run
+TEST     ?= sw/test.c
+SW_SRCS  := sw/start.S $(TEST)
 SW_LD    := sw/link.ld
 ELF      := $(OUT_DIR)/test.elf
 BIN      := $(OUT_DIR)/test.bin
-HEX      := program.hex
-IMG_BSV  := sw/ProgramImage.bsv
+HEX      := image.hex
+IMG_BSV  := sw/MemImage.bsv
 
 # ---------- TARGETS -----------
 
-.PHONY: all run image disasm clean
+.PHONY: all run image disasm clean rvctest
 
 all: $(OUT_DIR)/$(EXE)
 
 image: $(HEX) $(IMG_BSV)
+
+# M7b: standalone RV32C expander bench (no program image needed).
+rvctest: | $(OUT_DIR)
+	$(BSC) $(BSC_FLAGS) -u -g mkRVCExpandTest $(SRC_DIR)/frontend/RVCExpandTest.bsv
+	$(BSC) $(BSC_FLAGS) -e mkRVCExpandTest -o $(OUT_DIR)/rvctest
+	./$(OUT_DIR)/rvctest
 
 $(ELF): $(SW_SRCS) $(SW_LD) | $(OUT_DIR)
 	@echo "[img] compiling $(SW_SRCS)"
@@ -43,19 +53,26 @@ $(ELF): $(SW_SRCS) $(SW_LD) | $(OUT_DIR)
 
 $(BIN): $(ELF)
 	$(RV_OBJCOPY) -O binary $< $@
+	@sz=$$(wc -c < $@); r=$$(( (4 - sz % 4) % 4 )); \
+	if [ $$r -gt 0 ]; then head -c $$r /dev/zero >> $@; fi
 
 $(HEX): $(BIN)
-	@echo "[img] $@ <- $< (NOP-padded to $(IMEM_WORDS) words)"
+	@echo "[img] $@ <- $< (zero-padded to exactly $(MEM_WORDS) words)"
 	@od -An -v -tx4 -w4 $< | awk '{print $$1}' > $@
 	@real=$$(wc -l < $@); \
-	if [ $$real -gt $(IMEM_WORDS) ]; then \
-	  echo "ERROR: program is $$real words, exceeds IMEM_WORDS=$(IMEM_WORDS)"; exit 1; fi; \
-	for i in $$(seq $$real $$(( $(IMEM_WORDS) - 1 ))); do echo $(NOP) >> $@; done
+	if [ $$real -gt $(MEM_WORDS) ]; then \
+	  echo "ERROR: image is $$real words, exceeds MEM_WORDS=$(MEM_WORDS)"; exit 1; fi; \
+	pad=$$(( $(MEM_WORDS) - real )); \
+	if [ $$pad -gt 0 ]; then yes $(ZERO) | head -n $$pad >> $@; fi; \
+	final=$$(wc -l < $@); \
+	if [ $$final -ne $(MEM_WORDS) ]; then \
+	  echo "ERROR: $@ has $$final lines, expected exactly $(MEM_WORDS)"; exit 1; fi; \
+	echo "[img] $@ : $$final lines ($$real image + $$pad zero)"
 
 $(IMG_BSV): $(BIN)
-	@bytes=$$(wc -c < $<); words=$$(( bytes / 4 )); \
-	printf '// GENERATED from %s by the Makefile. Do not edit; not tracked.\npackage ProgramImage;\n  Integer progWords = %s;  // real compiled instructions\n  Integer imemWords = %s;  // program.hex size incl. NOP padding\nendpackage\n' "$(SW_SRCS)" "$$words" "$(IMEM_WORDS)" > $@; \
-	echo "[img] $@ : progWords=$$words imemWords=$(IMEM_WORDS)"
+	@bytes=$$(wc -c < $<); words=$$(( (bytes + 3) / 4 )); \
+	printf '// GENERATED from %s by the Makefile. Do not edit; not tracked.\npackage MemImage;\n  typedef %s MemWords;                 // unified memory size in 32-bit words\n  Integer memBaseAddr = %sh80000000;    // physical base of the unified memory\n  Integer imageWords  = %s;               // real bytes/4 loaded from the ELF\nendpackage\n' "$(SW_SRCS)" "$(MEM_WORDS)" "'" "$$words" > $@; \
+	echo "[img] $@ : MemWords=$(MEM_WORDS) imageWords=$$words"
 
 disasm: $(ELF)
 	$(RV_OBJDUMP) -d $<

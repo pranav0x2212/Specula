@@ -3,7 +3,8 @@ package SpeculaCore;
   import FetchUnit::*;
   import DecodeUnit::*;
   import Common::*;
-  import ProgramImage::*;
+  import UnifiedMemory::*;
+  import MemImage::*;
   import RenameStage::*;
   import PRF::*;
   import ReservationStation::*;
@@ -24,23 +25,24 @@ package SpeculaCore;
   } MemResult deriving (Bits, FShow);
 
   module mkSpeculaCore(Empty);
-    IfcFetchUnit fetch <- mkFetchUnit;
+    Memory_IFC mem <- mkMemory;
+
+    IfcFetchUnit fetch <- mkFetchUnit(mem);
     IfcDecodeUnit decodeUnit <- mkDecodeUnit;
     RenameStage_IFC rename <- mkRenameStage;
     PRF prf <- mkPRF;
     ReservationStationIfc rs <- mkReservationStation;
     ROB_IFC rob <- mkROB;
     ALU_IFC alu <- mkALU;
-    IfcLSU lsu <- mkLSU;
+    IfcLSU lsu <- mkLSU(mem);
     MemQueue_IFC memQ <- mkMemQueue;
     BranchPredictor_IFC bp <- mkBranchPredictor;
 
     FIFOF#(MemResult) memResultQ <- mkSizedFIFOF(4);
+    Addr      tohostAddr = 32'h10000000;
+    Bit#(32)  maxPC      = fromInteger(memBaseAddr + valueOf(MemWords) * 4);
 
-    Addr      tohostAddr = 32'h00000700;
-    Bit#(32)  maxPC      = fromInteger(imemWords) * 4;
-
-    Reg#(Bit#(32)) pc <- mkReg(0);
+    Reg#(Bit#(32)) pc <- mkReg(fromInteger(memBaseAddr));
     Reg#(Bool) halted <- mkReg(False);
     Reg#(Bool) flushPending <- mkReg(False);
     Reg#(UInt#(32)) cycleCount <- mkReg(0);
@@ -52,20 +54,21 @@ package SpeculaCore;
 
     Array#(Reg#(Bool))  cfInFlight       <- mkCReg(3, False);
 
-    FIFOF#(Tuple2#(Bit#(32), Instruction)) fetchedQ <- mkFIFOF();
-    FIFOF#(Tuple2#(Bit#(32), Decoded))     decodedQ <- mkFIFOF();
+    FIFOF#(Tuple3#(Bit#(32), Instruction, Bit#(32))) fetchedQ <- mkFIFOF();
+    FIFOF#(Tuple3#(Bit#(32), Decoded, Bit#(32)))     decodedQ <- mkFIFOF();
     FIFOF#(RenamedInstr) renamedInstrQ <- mkSizedFIFOF(8);
 
     rule doFetch (!halted && !flushPending && pc < maxPC
-                  && !(cfInFlight[0] && isControlFlowInstr(fetch.getInstr(pc))));
-      let instr = fetch.getInstr(pc);
+                  && !(cfInFlight[0] && isControlFlowInstr(fetch.at(pc).instr)));
+      let fs = fetch.at(pc);
+      let instr = fs.instr;
       let pr <- bp.predict(pc);
       Bool predTaken = pr.prediction && pr.isValid;
 
       Bool isCondBranch = (instr[6:0] == 7'b1100011);
       Bool isCF         = isControlFlowInstr(instr);
 
-      Bit#(32) predNext = (isCondBranch && predTaken) ? pr.targetAddr : (pc + 4);
+      Bit#(32) predNext = (isCondBranch && predTaken) ? pr.targetAddr : fs.npc;
 
       if (isCF) begin
         brPredNextPC[1] <= predNext;
@@ -75,24 +78,25 @@ package SpeculaCore;
       end
 
       fetch.start(pc);
-      fetchedQ.enq(tuple2(pc, instr));
+      fetchedQ.enq(tuple3(pc, instr, fs.npc));
       pc <= predNext;
     endrule
 
     rule doDecode (!flushPending);
-      match {.fpc, .instr} = fetchedQ.first;
+      match {.fpc, .instr, .fallpc} = fetchedQ.first;
       fetchedQ.deq;
-      decodeUnit.start(instr, fpc);        
-      decodedQ.enq(tuple2(fpc, decode(instr, fpc)));
+      decodeUnit.start(instr, fpc);
+      decodedQ.enq(tuple3(fpc, decode(instr, fpc), fallpc));
     endrule
 
     rule doRename (!flushPending && renamedInstrQ.notFull);
-      match {.fpc, .d} = decodedQ.first;
+      match {.fpc, .d, .fallpc} = decodedQ.first;
       decodedQ.deq;
-      rename.start(d);                     
+      rename.start(d);
       renamedInstrQ.enq(RenamedInstr {
         instr:     d,
         pc:        fpc,
+        fallPC:    fallpc,
         src1Tag:   0,
         src1Ready: True,
         src2Tag:   0,
@@ -162,9 +166,10 @@ package SpeculaCore;
             (isLoad ? tagged Valid r.instr.rd : tagged Invalid),
             (isLoad && r.instr.rd != 0 ? tagged Valid destTag : tagged Invalid),
             oldPhysDst,
-            !isLoad,  
-            False,     
-            False);    
+            !isLoad,
+            False,
+            False,
+            r.instr.funct3);
 
           PhysRegTag basePhys = rename.lookupMapping(r.instr.rs1);
           PhysRegTag dataPhys = rename.lookupMapping(r.instr.rs2);
@@ -178,6 +183,7 @@ package SpeculaCore;
             sdata:  dataPhys,
             imm:    r.instr.imm,
             dest:   destTag,
+            funct3: r.instr.funct3,
             robTag: robTag
           });
           $display("[DISPATCH] %s rob=%0d -> MemQueue (base=x%0d data=x%0d imm=%0d)",
@@ -197,7 +203,7 @@ package SpeculaCore;
             if (r.instr.rd != 0)
               prf.clear(destTag);
 
-            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd == 0 ? tagged Invalid : tagged Valid destTag), oldPhysDst, False, False, isCF);
+            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd == 0 ? tagged Invalid : tagged Valid destTag), oldPhysDst, False, False, isCF, 3'b000);
 
             if (isCF) begin
               rename.checkpoint(r.instr.rd != 0 ? tagged Valid tuple2(r.instr.rd, destTag) : tagged Invalid);
@@ -224,7 +230,8 @@ package SpeculaCore;
               useImmediate: shouldUseImm,
               dest: destTag,
               robTag: robTag,
-              pc: r.pc
+              pc: r.pc,
+              fallPC: r.fallPC
             };
             
             rs.enq(rsEntry);
@@ -247,7 +254,7 @@ package SpeculaCore;
       if (cycleCount > 100000000)
         $display("[Specula] Max cycles reached (%0d), terminating", cycleCount);
       else
-        $display("[Specula] WARNING: fetch reached maxPC safety bound (%h) without a tohost write - halting", maxPC);
+        $display("[Specula] WARNING: fetch reached end of physical memory (%h) without a tohost write - halting", maxPC);
       halted <= True;
     endrule
 
@@ -283,8 +290,8 @@ package SpeculaCore;
               $display("[Specula] Simulation complete - terminated by tohost");
               $finish(0);
             end else begin
-              lsu.storeToMem(entry.memAddr, entry.data);
-              $display("[COMMIT] store rob=%0d retired (addr=%h data=%0d)", tag.idx, entry.memAddr, entry.data);
+              lsu.storeToMem(entry.memAddr, entry.data, entry.memFunct3);
+              $display("[COMMIT] store rob=%0d retired (addr=%h funct3=%b raw=%h)", tag.idx, entry.memAddr, entry.memFunct3, entry.data);
             end
           end else if (entry.dst matches tagged Valid .dstReg) begin
             $display("[COMMIT] rob=%0d committed: x%0d <- %0d", tag.idx, dstReg, entry.data);
@@ -307,10 +314,11 @@ package SpeculaCore;
       ALUReq aluReq = ALUReq {
         opcode: rsEntry.opcode,
         a: aVal,
-        b: bVal,  
+        b: bVal,
         dest: rsEntry.dest,
         robTag: rsEntry.robTag,
         pc: rsEntry.pc,
+        fallPC: rsEntry.fallPC,
         branchOffset: rsEntry.immediate
       };
       
@@ -367,23 +375,32 @@ package SpeculaCore;
         Data baseVal = fromMaybe(0, prf.read(e.base));
         Addr addr = baseVal + e.imm;
 
+        if (isMisalignedAccess(e.funct3, addr))
+          $display("[LSU] MISALIGNED %s addr=%h funct3=%b - unsupported (M5), operating on the containing word only",
+                   e.isLoad ? "load" : "store", addr, e.funct3);
+
         if (e.isLoad) begin
-          let fwd = lsu.sqForward(addr, e.robTag, hTag);
-          Data result = 0;
-          if (fwd matches tagged Valid .d) begin
-            result = d;
-            $display("[LSU] Load rob=%0d addr=%h FORWARDED from store queue: data=%h", e.robTag.idx, addr, d);
-          end else begin
-            let m <- lsu.load(addr);
-            result = m;
+          match {.covered, .fwdWord} = lsu.sqForward(addr, e.robTag, hTag);
+          Data full = fwdWord;
+          if (covered != 4'b1111) begin
+            let mw <- lsu.load(addr);
+            for (Integer lane = 0; lane < 4; lane = lane + 1)
+              if (covered[lane] == 1'b0) begin
+                Bit#(32) laneMask = 32'hFF << (8 * lane);
+                full = (full & ~laneMask) | (mw & laneMask);
+              end
           end
+          Data result = loadExtract(full, addr[1:0], e.funct3);
+          if (covered != 0)
+            $display("[LSU] Load rob=%0d addr=%h : forwarded lanes=%b fwd=%h merged-word=%h",
+                     e.robTag.idx, addr, covered, fwdWord, full);
           memResultQ.enq(MemResult { isLoad: True, dest: e.dest, data: result, addr: 0, robTag: e.robTag });
-          $display("[MEMQ] load rob=%0d issued: addr=%h result=%h", e.robTag.idx, addr, result);
+          $display("[MEMQ] load rob=%0d issued: addr=%h funct3=%b result=%h", e.robTag.idx, addr, e.funct3, result);
         end else begin
           Data sdata = fromMaybe(0, prf.read(e.sdata));
-          lsu.sqExecStore(e.robTag, addr, sdata);   
+          lsu.sqExecStore(e.robTag, addr, sdata, e.funct3);
           memResultQ.enq(MemResult { isLoad: False, dest: 0, data: sdata, addr: addr, robTag: e.robTag });
-          $display("[MEMQ] store rob=%0d issued: addr=%h data=%h", e.robTag.idx, addr, sdata);
+          $display("[MEMQ] store rob=%0d issued: addr=%h funct3=%b raw-data=%h", e.robTag.idx, addr, e.funct3, sdata);
         end
         memQ.issue(idx);
       end
@@ -393,7 +410,7 @@ package SpeculaCore;
       let aluResp <- alu.deq();
 
       if (aluResp.isBranch) begin
-        Bit#(32) actualNextPC = aluResp.actualTaken ? aluResp.actualTarget : (aluResp.pc + 4);
+        Bit#(32) actualNextPC = aluResp.actualTaken ? aluResp.actualTarget : aluResp.fallPC;
         Bool mispred = (actualNextPC != brPredNextPC[0]);
 
         rob.completeEntry(aluResp.robTag, aluResp.result, 0, mispred, actualNextPC);

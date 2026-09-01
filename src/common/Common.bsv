@@ -6,6 +6,12 @@ package Common;
   typedef Bit#(32) Addr;
   typedef Maybe#(ROBTag) RATEntry;
 
+  typedef struct {
+    Instruction instr;
+    Bit#(32)    npc;
+    Bool        isComp;
+  } FetchSlice deriving (Bits, FShow);
+
   typedef enum {
     OP_IMM, OP, LUI, AUIPC, JAL, JALR, BRANCH, LOAD, STORE, MISC_MEM, SYSTEM, INVALID
   } Opcode deriving (Bits, Eq, FShow);
@@ -19,6 +25,7 @@ package Common;
     ALU_SLT, ALU_SLTU,        
     ALU_XOR,                  
     ALU_LUI,                  
+    ALU_AUIPC, ALU_NOP,
     ALU_BLTU, ALU_BGEU         
   } ALUOp deriving (Bits, Eq, FShow);
 
@@ -36,6 +43,7 @@ package Common;
   typedef struct {
     Decoded instr;
     Bit#(32) pc;
+    Bit#(32) fallPC;
     PhysRegTag src1Tag;
     Bool src1Ready;
     PhysRegTag src2Tag;
@@ -83,6 +91,10 @@ package Common;
       endcase
     end else if (actualOpcode == 7'b0110111) begin  // LUI
       aluOp = ALU_LUI;
+    end else if (actualOpcode == 7'b0010111) begin  // AUIPC
+      aluOp = ALU_AUIPC;
+    end else if (actualOpcode == 7'b0001111) begin  // MISC-MEM (FENCE) -> retiring NOP
+      aluOp = ALU_NOP;
     end else if (actualOpcode == 7'b0000011) begin  // LOAD (LW)
       aluOp = ALU_LW;
     end else if (actualOpcode == 7'b0100011) begin  // STORE (SW)
@@ -115,6 +127,12 @@ package Common;
     end else if (actualOpcode == 7'b0110111) begin  // LUI - U-type immediate
       imm = {instr[31:12], 12'd0};
       rs2Field = 0;
+    end else if (actualOpcode == 7'b0010111) begin  // AUIPC - U-type immediate
+      imm = {instr[31:12], 12'd0};
+      rs2Field = 0;
+    end else if (actualOpcode == 7'b0001111) begin  // FENCE - no immediate, no source regs
+      imm = 0;
+      rs2Field = 0;
     end else if (actualOpcode == 7'b0000011) begin  // LOAD (LW) - I-type
       imm = signExtend(instr[31:20]);
       rs2Field = 0;
@@ -140,7 +158,8 @@ package Common;
 
     RegIndex rdField = (actualOpcode == 7'b1100011) ? 0 : instr[11:7];
 
-    RegIndex rs1Field = ((actualOpcode == 7'b1101111) || (actualOpcode == 7'b0110111))
+    RegIndex rs1Field = ((actualOpcode == 7'b1101111) || (actualOpcode == 7'b0110111)
+                         || (actualOpcode == 7'b0010111) || (actualOpcode == 7'b0001111))
                         ? 0 : instr[19:15];
 
     return Decoded {
@@ -254,6 +273,7 @@ package Common;
     PhysRegTag dest;
     ROBTag robTag;
     Addr pc;
+    Addr fallPC;
   } RSEntry deriving (Bits, FShow);
 
   typedef struct {

@@ -2,10 +2,10 @@ ENTRY(_start)
 
 SECTIONS
 {
-  . = 0x00000000;
+  . = 0x80000000;
 
   .text : {
-    *(.text.init)       /* sw/start.S : _start must be at 0x0 */
+    *(.text.init)
     *(.text .text.*)
   }
 

@@ -38,6 +38,6 @@ bsc.dir/
 # Simulation output
 output.txt
 
-# ---- M1: generated instruction image (from sw/test.c) ----
-/program.hex
-/sw/ProgramImage.bsv
+# ---- generated unified-memory image (from sw/*.c) ----
+/image.hex
+/sw/MemImage.bsv

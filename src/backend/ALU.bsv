@@ -16,6 +16,7 @@ package ALU;
     PhysRegTag dest;
     ROBTag robTag;
     Bit#(32) pc;
+    Bit#(32) fallPC;
     Bit#(32) branchOffset;
   } ALUReq deriving (Bits, FShow);
 
@@ -23,11 +24,12 @@ package ALU;
     Data result;
     PhysRegTag dest;
     ROBTag robTag;
-    Bool isBranch;      
-    Bool isJump;       
+    Bool isBranch;
+    Bool isJump;
     Bool actualTaken;
     Data actualTarget;
     Bit#(32) pc;
+    Bit#(32) fallPC;
   } ALUResp deriving (Bits, FShow);
 
   interface ALU_IFC;
@@ -73,16 +75,18 @@ package ALU;
         ALU_SRA: res = signedShiftRight(r.a, r.b[4:0]);
         ALU_SLT:  res = signedLT(r.a, r.b) ? 32'd1 : 32'd0;
         ALU_SLTU: res = (r.a < r.b)        ? 32'd1 : 32'd0;
-        ALU_LUI: res = r.b;   
+        ALU_LUI: res = r.b;
+        ALU_AUIPC: res = r.pc + r.branchOffset;
+        ALU_NOP: res = 32'd0;
         ALU_JAL: begin
           isBranch = True; isJump = True; actualTaken = True;
           actualTarget = r.pc + r.branchOffset;
-          res = r.pc + 4;
+          res = r.fallPC;
         end
         ALU_JALR: begin
           isBranch = True; isJump = True; actualTaken = True;
           actualTarget = (r.a + r.branchOffset) & 32'hFFFFFFFE;
-          res = r.pc + 4;
+          res = r.fallPC;
         end
         ALU_BEQ: begin
           isBranch = True;
@@ -110,13 +114,13 @@ package ALU;
         end
         ALU_BLTU: begin
           isBranch = True;
-          actualTaken = (r.a < r.b);        // unsigned
+          actualTaken = (r.a < r.b);
           actualTarget = r.pc + r.branchOffset;
           res = 0;
         end
         ALU_BGEU: begin
           isBranch = True;
-          actualTaken = (r.a >= r.b);       // unsigned
+          actualTaken = (r.a >= r.b);
           actualTarget = r.pc + r.branchOffset;
           res = 0;
         end
@@ -131,7 +135,8 @@ package ALU;
         isJump: isJump,
         actualTaken: actualTaken,
         actualTarget: actualTarget,
-        pc: r.pc
+        pc: r.pc,
+        fallPC: r.fallPC
       };
       respQ.enq(out);
     endrule

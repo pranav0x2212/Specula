@@ -17,7 +17,8 @@ typedef struct {
   Bool completed;
   Data data;
   Bool isStore;
-  Addr memAddr;        
+  Addr memAddr;
+  Bit#(3) memFunct3;
   Bool isBranch;
   Bool mispredicted;
   Addr redirectPC;
@@ -26,7 +27,7 @@ typedef struct {
 interface ROB_IFC;
   method Bool canAllocate();
   method Bool isEmpty();
-  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch);
+  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch, Bit#(3) memFunct3);
   method Action writeResult(ROBTag tag, Data data);
   method Action markCompleted(ROBTag tag);
   method Action writeResultAndMark(ROBTag tag, Data data);
@@ -57,7 +58,7 @@ module mkROB(ROB_IFC);
     return (count == 0);
   endmethod
 
-  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch);
+  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch, Bit#(3) memFunct3);
     if (!(count < fromInteger(valueOf(NumEntries))))
       $fatal(1, "ROB full!");
 
@@ -71,6 +72,7 @@ module mkROB(ROB_IFC);
       data: unpack(0),
       isStore: isStore,
       memAddr: 0,
+      memFunct3: memFunct3,
       isBranch: isBranch,
       mispredicted: False,
       redirectPC: 0
@@ -117,6 +119,7 @@ module mkROB(ROB_IFC);
         data: entry.data,
         isStore: entry.isStore,
         memAddr: entry.memAddr,
+        memFunct3: entry.memFunct3,
         isBranch: entry.isBranch,
         mispredicted: entry.mispredicted,
         redirectPC: entry.redirectPC

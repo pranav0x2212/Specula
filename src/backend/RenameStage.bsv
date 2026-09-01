@@ -12,6 +12,7 @@ package RenameStage;
     method PhysRegTag lookupMapping(RegIndex r);
     method Bool isWritten(RegIndex r);
     method Action freeReg(PhysRegTag tag);
+    method Bool hasPhysFree();
     method Action checkpoint(Maybe#(Tuple2#(RegIndex, PhysRegTag)) alloc);
     method Action restoreCheckpoint();
   endinterface
@@ -82,6 +83,8 @@ package RenameStage;
       freelist.free(tag);
       $display("[RENAME] Freed physical register p%0d", tag);
     endmethod
+
+    method Bool hasPhysFree() = freelist.hasFree();
 
     method Action checkpoint(Maybe#(Tuple2#(RegIndex, PhysRegTag)) alloc);
       Vector#(32, PhysRegTag)      m = readVReg(archRegMap);

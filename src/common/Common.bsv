@@ -56,7 +56,7 @@ package Common;
   } RenamedInstr deriving (Bits, FShow);
 
   typedef 6 LogNumPhysRegs;
-  typedef 32 NUM_PHYS_REGS;
+  typedef 64 NUM_PHYS_REGS;
   typedef Bit#(LogNumPhysRegs) PhysRegTag;
 
   typedef PhysRegTag ZERO_TAG;
@@ -284,6 +284,10 @@ package Common;
   
   function Bool isStoreOp(ALUOp op);
     return (op == ALU_SW);
+  endfunction
+
+  function Bool needsPhysDest(Decoded d);
+    return (d.rd != 0) && (d.opcode != ALU_SW);
   endfunction
 
   typedef struct {

@@ -164,6 +164,7 @@ package SpeculaCore;
 
     rule doDispatch (renamedInstrQ.notEmpty && !flushPending
                      && rob.canAllocate
+                     && (needsPhysDest(renamedInstrQ.first.instr) ? rename.hasPhysFree : True)
                      && (isSerializingOp(renamedInstrQ.first.instr.opcode)
                           ? True
                           : (isMemoryOp(renamedInstrQ.first.instr.opcode)

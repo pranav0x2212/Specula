@@ -1,4 +1,4 @@
-#define TOHOST (*(volatile int *)0x10000000)
+#define TOHOST (*(volatile int *)0x00100000)
 
 static int __attribute__((noinline)) add1(int x) { return x + 1; }
 static int __attribute__((noinline)) mul3(int x) { return x + x + x; }

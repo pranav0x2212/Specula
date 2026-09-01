@@ -28,7 +28,8 @@ package Common;
     ALU_AUIPC, ALU_NOP,
     ALU_BLTU, ALU_BGEU,
     ALU_MUL, ALU_DIVU, ALU_REMU,
-    ALU_CSR, ALU_MRET
+    ALU_CSR, ALU_MRET,
+    ALU_AMOSWAP
   } ALUOp deriving (Bits, Eq, FShow);
 
   typedef struct {
@@ -126,6 +127,8 @@ package Common;
       aluOp = ALU_CSR;   // SYSTEM Zicsr: funct3 001/010/011/101/110/111 = CSRRW/S/C[I]
     end else if (actualOpcode == 7'b1110011 && funct3 == 3'b000 && instr[31:20] == 12'h302) begin
       aluOp = ALU_MRET;  // SYSTEM: MRET
+    end else if (actualOpcode == 7'b0101111 && funct3 == 3'b010 && instr[31:27] == 5'b00001) begin
+      aluOp = ALU_AMOSWAP;  // RV32A: AMOSWAP.W (aq/rl in bits 26:25 ignored)
     end else begin
       aluOp = ALU_ADD;
     end
@@ -234,7 +237,7 @@ package Common;
   endfunction
 
   function Bool isMemoryOp(ALUOp op);
-    return (op == ALU_LW || op == ALU_SW);
+    return (op == ALU_LW || op == ALU_SW || op == ALU_AMOSWAP);
   endfunction
 
   function Bool isBranchOp(ALUOp op);

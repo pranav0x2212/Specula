@@ -35,7 +35,7 @@ IMG_BSV  := sw/MemImage.bsv
 
 # ---------- TARGETS -----------
 
-.PHONY: all run image disasm clean rvctest csrtest
+.PHONY: all run image disasm clean rvctest csrtest uarttest
 
 all: $(OUT_DIR)/$(EXE)
 
@@ -52,6 +52,12 @@ csrtest: | $(OUT_DIR)
 	$(BSC) $(BSC_FLAGS) -u -g mkCSRFileTest $(SRC_DIR)/backend/CSRFileTest.bsv
 	$(BSC) $(BSC_FLAGS) -e mkCSRFileTest -o $(OUT_DIR)/csrtest
 	./$(OUT_DIR)/csrtest
+
+# M9: standalone UART / SystemBus bench (no program image needed).
+uarttest: | $(OUT_DIR)
+	$(BSC) $(BSC_FLAGS) -u -g mkUartTest $(SRC_DIR)/backend/UartTest.bsv
+	$(BSC) $(BSC_FLAGS) -e mkUartTest -o $(OUT_DIR)/uarttest
+	./$(OUT_DIR)/uarttest
 
 $(ELF): $(SW_SRCS) $(SW_LD) | $(OUT_DIR)
 	@echo "[img] compiling $(SW_SRCS)"

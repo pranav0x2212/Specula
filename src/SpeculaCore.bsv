@@ -14,13 +14,16 @@ package SpeculaCore;
   import MemQueue::*;
   import BranchPredictor::*;
   import CSRFile::*;
+  import SystemBus::*;
   import FIFOF::*;
   import Vector::*;
 
   typedef struct {
     Bool       isLoad;
+    Bool       isAmo;
     PhysRegTag dest;
     Data       data;
+    Data       rdData;
     Addr       addr;
     ROBTag     robTag;
   } MemResult deriving (Bits, FShow);
@@ -38,7 +41,7 @@ package SpeculaCore;
   } SysMeta deriving (Bits, FShow);
 
   module mkSpeculaCore(Empty);
-    Memory_IFC mem <- mkMemory;
+    Memory_IFC mem <- mkSystemBus;
 
     IfcFetchUnit fetch <- mkFetchUnit(mem);
     IfcDecodeUnit decodeUnit <- mkDecodeUnit;
@@ -58,7 +61,7 @@ package SpeculaCore;
     Reg#(SysMeta)   sysMeta     <- mkRegU;
 
     FIFOF#(MemResult) memResultQ <- mkSizedFIFOF(4);
-    Addr      tohostAddr = 32'h10000000;
+    Addr      tohostAddr = 32'h00100000;
     Bit#(32)  maxPC      = fromInteger(memBaseAddr + valueOf(MemWords) * 4);
 
     Reg#(Bit#(32)) pc <- mkReg(fromInteger(memBaseAddr));
@@ -168,8 +171,9 @@ package SpeculaCore;
                                : rs.notFull))
                      && !(isControlFlowOp(renamedInstrQ.first.instr.opcode) && brOutstanding[0]));
       let r = renamedInstrQ.first;
-      Bool isMemoryOp = (r.instr.opcode == ALU_LW) || (r.instr.opcode == ALU_SW);
+      Bool isMemoryOp = (r.instr.opcode == ALU_LW) || (r.instr.opcode == ALU_SW) || (r.instr.opcode == ALU_AMOSWAP);
       Bool isLoad = (r.instr.opcode == ALU_LW);
+      Bool isAmo  = (r.instr.opcode == ALU_AMOSWAP);
 
       if (isSerializingOp(r.instr.opcode)) begin
         Bool     isMretI   = isMretOp(r.instr.opcode);
@@ -219,7 +223,7 @@ package SpeculaCore;
         Maybe#(PhysRegTag) oldPhysDst = tagged Invalid;
         Bool canDispatch = True;
 
-        if (isLoad && r.instr.rd != 0) begin
+        if ((isLoad || isAmo) && r.instr.rd != 0) begin
           let allocResult <- rename.allocateDestReg(r.instr.rd);
           match {.dTag, .oldTag, .success} = allocResult;
           destTag = dTag;
@@ -230,12 +234,12 @@ package SpeculaCore;
         if (canDispatch) begin
           renamedInstrQ.deq;
 
-          if (isLoad && r.instr.rd != 0)
+          if ((isLoad || isAmo) && r.instr.rd != 0)
             prf.clear(destTag);
 
           let robTag <- rob.allocate(
-            (isLoad ? tagged Valid r.instr.rd : tagged Invalid),
-            (isLoad && r.instr.rd != 0 ? tagged Valid destTag : tagged Invalid),
+            ((isLoad || isAmo) ? tagged Valid r.instr.rd : tagged Invalid),
+            ((isLoad || isAmo) && r.instr.rd != 0 ? tagged Valid destTag : tagged Invalid),
             oldPhysDst,
             !isLoad,
             False,
@@ -250,6 +254,7 @@ package SpeculaCore;
 
           memQ.enq(MemQEntry {
             isLoad: isLoad,
+            isAmo:  isAmo,
             base:   basePhys,
             sdata:  dataPhys,
             imm:    r.instr.imm,
@@ -258,7 +263,7 @@ package SpeculaCore;
             robTag: robTag
           });
           $display("[DISPATCH] %s rob=%0d -> MemQueue (base=x%0d data=x%0d imm=%0d)",
-                   isLoad ? "LOAD" : "STORE", robTag.idx, r.instr.rs1, r.instr.rs2, r.instr.imm);
+                   isAmo ? "AMOSWAP" : (isLoad ? "LOAD" : "STORE"), robTag.idx, r.instr.rs1, r.instr.rs2, r.instr.imm);
         end
       end else begin
         if (rs.notFull) begin
@@ -437,7 +442,7 @@ package SpeculaCore;
           let e = entries[i];
           Bool baseRdy = prf.isReady(e.base);
           Bool dataRdy = e.isLoad || prf.isReady(e.sdata);
-          Bool ordOK   = !e.isLoad || !lsu.sqOlderStorePending(e.robTag, hTag);
+          Bool ordOK   = (!e.isLoad && !e.isAmo) || !lsu.sqOlderStorePending(e.robTag, hTag);
           ok = baseRdy && dataRdy && ordOK;
         end
         m[i] = ok;
@@ -479,7 +484,22 @@ package SpeculaCore;
           $display("[LSU] MISALIGNED %s addr=%h funct3=%b - unsupported (M5), operating on the containing word only",
                    e.isLoad ? "load" : "store", addr, e.funct3);
 
-        if (e.isLoad) begin
+        if (e.isAmo) begin
+          match {.covered, .fwdWord} = lsu.sqForward(addr, e.robTag, hTag);
+          Data full = fwdWord;
+          if (covered != 4'b1111) begin
+            let mw <- lsu.load(addr);
+            for (Integer lane = 0; lane < 4; lane = lane + 1)
+              if (covered[lane] == 1'b0) begin
+                Bit#(32) laneMask = 32'hFF << (8 * lane);
+                full = (full & ~laneMask) | (mw & laneMask);
+              end
+          end
+          Data rs2v = fromMaybe(0, prf.read(e.sdata));
+          lsu.sqExecStore(e.robTag, addr, rs2v, e.funct3);
+          memResultQ.enq(MemResult { isLoad: False, isAmo: True, dest: e.dest, data: rs2v, rdData: full, addr: addr, robTag: e.robTag });
+          $display("[MEMQ] amoswap rob=%0d issued: addr=%h old=%h new=%h", e.robTag.idx, addr, full, rs2v);
+        end else if (e.isLoad) begin
           match {.covered, .fwdWord} = lsu.sqForward(addr, e.robTag, hTag);
           Data full = fwdWord;
           if (covered != 4'b1111) begin
@@ -494,12 +514,12 @@ package SpeculaCore;
           if (covered != 0)
             $display("[LSU] Load rob=%0d addr=%h : forwarded lanes=%b fwd=%h merged-word=%h",
                      e.robTag.idx, addr, covered, fwdWord, full);
-          memResultQ.enq(MemResult { isLoad: True, dest: e.dest, data: result, addr: 0, robTag: e.robTag });
+          memResultQ.enq(MemResult { isLoad: True, isAmo: False, dest: e.dest, data: result, rdData: 0, addr: 0, robTag: e.robTag });
           $display("[MEMQ] load rob=%0d issued: addr=%h funct3=%b result=%h", e.robTag.idx, addr, e.funct3, result);
         end else begin
           Data sdata = fromMaybe(0, prf.read(e.sdata));
           lsu.sqExecStore(e.robTag, addr, sdata, e.funct3);
-          memResultQ.enq(MemResult { isLoad: False, dest: 0, data: sdata, addr: addr, robTag: e.robTag });
+          memResultQ.enq(MemResult { isLoad: False, isAmo: False, dest: 0, data: sdata, rdData: 0, addr: addr, robTag: e.robTag });
           $display("[MEMQ] store rob=%0d issued: addr=%h funct3=%b raw-data=%h", e.robTag.idx, addr, e.funct3, sdata);
         end
         memQ.issue(idx);
@@ -570,7 +590,14 @@ package SpeculaCore;
     rule doMemWriteback (memResultQ.notEmpty);
       let mr = memResultQ.first; memResultQ.deq;
       rob.completeEntry(mr.robTag, mr.data, mr.addr, False, 0);
-      if (mr.isLoad) begin
+      if (mr.isAmo) begin
+        if (mr.dest != 0) begin
+          prf.write(mr.dest, mr.rdData);
+          prf.markReady(mr.dest);
+        end
+        rs.wakeup(mr.dest);
+        $display("[Writeback] amoswap rob=%0d : rd p%0d <- %h (mem <- %h)", mr.robTag.idx, mr.dest, mr.rdData, mr.data);
+      end else if (mr.isLoad) begin
         if (mr.dest != 0) begin
           prf.write(mr.dest, mr.data);
           prf.markReady(mr.dest);

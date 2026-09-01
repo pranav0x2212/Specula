@@ -1,4 +1,4 @@
-#define TOHOST (*(volatile int *)0x10000000)
+#define TOHOST (*(volatile int *)0x00100000)
 
 __attribute__((noreturn)) void main(void){
   unsigned a, b, c;

@@ -1,4 +1,4 @@
-#define TOHOST (*(volatile int *)0x10000000)
+#define TOHOST (*(volatile int *)0x00100000)
 
 static int __attribute__((noinline)) sgn(int v){
   if (v < 0) return -1;

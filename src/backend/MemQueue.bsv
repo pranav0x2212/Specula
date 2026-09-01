@@ -8,6 +8,7 @@ package MemQueue;
 
   typedef struct {
     Bool       isLoad;
+    Bool       isAmo;
     PhysRegTag base;
     PhysRegTag sdata;
     Data       imm;
@@ -43,7 +44,7 @@ package MemQueue;
         payload[idx]  <= e;
         valid[idx][1] <= True;
         $display("[MEMQ] enq %s rob=%0d base=p%0d sdata=p%0d dest=p%0d imm=%0d funct3=%b",
-                 e.isLoad ? "load" : "store", e.robTag.idx, e.base, e.sdata, e.dest, e.imm, e.funct3);
+                 e.isAmo ? "amoswap" : (e.isLoad ? "load" : "store"), e.robTag.idx, e.base, e.sdata, e.dest, e.imm, e.funct3);
       end else
         $display("[MEMQ] enq FAILED: full");
     endmethod

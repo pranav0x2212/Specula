@@ -1,4 +1,4 @@
-    .equ    TOHOST, 0x10000000
+    .equ    TOHOST, 0x00100000
 
     .section .text
     .globl  main

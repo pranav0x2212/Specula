@@ -1,4 +1,4 @@
-    .equ    TOHOST,  0x10000000
+    .equ    TOHOST,  0x00100000
     .equ    CANARY,  0x80030000       # scratch RAM, zero at reset, never legitimately written
 
     .section .text

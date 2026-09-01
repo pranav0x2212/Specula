@@ -1,7 +1,7 @@
     .section .text
     .globl  main
 main:
-    li      t6, 0x10000000          # tohost
+    li      t6, 0x00100000          # tohost
 
     # MUL: 0x1000 * 3 = 0x3000
     li      t0, 0x1000

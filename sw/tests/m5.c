@@ -1,4 +1,4 @@
-#define TOHOST (*(volatile int *)0x10000000)
+#define TOHOST (*(volatile int *)0x00100000)
 
 static int __attribute__((noinline)) sum_sb(signed char *p){        /* LB  x4 */
   int s = 0; for (int i = 0; i < 4; i++) s += p[i]; return s; }

@@ -25,7 +25,6 @@ package RenameStage;
     Reg#(Decoded) currentInstr <- mkRegU;
     Reg#(Vector#(32, PhysRegTag))            shadowMap     <- mkRegU;
     Reg#(Vector#(32, Bool))                  shadowWritten <- mkRegU;
-    Reg#(Vector#(NUM_PHYS_REGS, Bool))       shadowFree    <- mkRegU;
 
     method Action start(Decoded d);
       currentInstr <= d;
@@ -89,22 +88,29 @@ package RenameStage;
     method Action checkpoint(Maybe#(Tuple2#(RegIndex, PhysRegTag)) alloc);
       Vector#(32, PhysRegTag)      m = readVReg(archRegMap);
       Vector#(32, Bool)            w = readVReg(archRegWritten);
-      Vector#(NUM_PHYS_REGS, Bool) f = freelist.snapshot();
       if (alloc matches tagged Valid {.rd, .tag} &&& rd != 0) begin
         m[rd]  = tag;
         w[rd]  = True;
-        f[tag] = False;   
       end
       shadowMap     <= m;
       shadowWritten <= w;
-      shadowFree    <= f;
       $display("[RENAME] checkpoint taken");
     endmethod
 
     method Action restoreCheckpoint();
       writeVReg(archRegMap, shadowMap);
       writeVReg(archRegWritten, shadowWritten);
-      freelist.restore(shadowFree);
+      Vector#(32, PhysRegTag)     sm = shadowMap;
+      Vector#(32, Bool)           sw = shadowWritten;
+      Vector#(NUM_PHYS_REGS, Bool) freeVec = newVector;
+      for (Integer p = 0; p < valueOf(NUM_PHYS_REGS); p = p + 1) begin
+        Bool referenced = False;
+        for (Integer r = 1; r < 32; r = r + 1)
+          if (sw[r] && sm[r] == fromInteger(p))
+            referenced = True;
+        freeVec[p] = !referenced;
+      end
+      freelist.restoreExact(freeVec);
       $display("[RENAME] rename map + free list restored from checkpoint");
     endmethod
 

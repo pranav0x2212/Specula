@@ -31,7 +31,7 @@ package FetchUnit;
 
     method Action start(Bit#(32) pc);
       let fs = slice(pc);
-      $display("[Fetch] PC: %08x | %s | instr: %08x",
+      if (traceOn) $display("[Fetch] PC: %08x | %s | instr: %08x",
                pc, fs.isComp ? "c16" : "i32", fs.instr);
     endmethod
 

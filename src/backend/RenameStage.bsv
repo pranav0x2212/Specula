@@ -28,7 +28,7 @@ package RenameStage;
 
     method Action start(Decoded d);
       currentInstr <= d;
-      $display("[RENAME] Storing decoded instr: opcode=%0d rd=x%0d rs1=x%0d", d.opcode, d.rd, d.rs1);
+      if (traceOn) $display("[RENAME] Storing decoded instr: opcode=%0d rd=x%0d rs1=x%0d", d.opcode, d.rd, d.rs1);
     endmethod
 
     method Decoded getCurrent();
@@ -50,7 +50,7 @@ package RenameStage;
           end
           archRegMap[rd] <= destTag;
           archRegWritten[rd] <= True;
-          $display("[RENAME] Allocated p%0d for x%0d", tag, rd);
+          if (traceOn) $display("[RENAME] Allocated p%0d for x%0d", tag, rd);
         end else begin
           success = False;
           $display("[RENAME] No free physical registers for x%0d", rd);
@@ -66,7 +66,7 @@ package RenameStage;
       if (rd != 0) begin
         archRegMap[rd] <= physTag;
         archRegWritten[rd] <= True;
-        $display("[RENAME] Updated mapping: x%0d -> p%0d", rd, physTag);
+        if (traceOn) $display("[RENAME] Updated mapping: x%0d -> p%0d", rd, physTag);
       end
     endmethod
 
@@ -80,7 +80,7 @@ package RenameStage;
 
     method Action freeReg(PhysRegTag tag);
       freelist.free(tag);
-      $display("[RENAME] Freed physical register p%0d", tag);
+      if (traceOn) $display("[RENAME] Freed physical register p%0d", tag);
     endmethod
 
     method Bool hasPhysFree() = freelist.hasFree();
@@ -94,7 +94,7 @@ package RenameStage;
       end
       shadowMap     <= m;
       shadowWritten <= w;
-      $display("[RENAME] checkpoint taken");
+      if (traceOn) $display("[RENAME] checkpoint taken");
     endmethod
 
     method Action restoreCheckpoint();
@@ -111,7 +111,7 @@ package RenameStage;
         freeVec[p] = !referenced;
       end
       freelist.restoreExact(freeVec);
-      $display("[RENAME] rename map + free list restored from checkpoint");
+      if (traceOn) $display("[RENAME] rename map + free list restored from checkpoint");
     endmethod
 
   endmodule

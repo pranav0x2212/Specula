@@ -137,9 +137,9 @@ module mkROB(ROB_IFC);
     if (count > 0 && completionFlags[head]) begin
       if (robEntries[head].oldPhysDst matches tagged Valid .oldPhysReg) begin
         rename.freeReg(oldPhysReg);
-        $display("[ROB] Committing ROB[%0d]: freed old physical register p%0d", head, oldPhysReg);
+        if (traceOn) $display("[ROB] Committing ROB[%0d]: freed old physical register p%0d", head, oldPhysReg);
       end else begin
-        $display("[ROB] Committing ROB[%0d]: no old physical register to free", head);
+        if (traceOn) $display("[ROB] Committing ROB[%0d]: no old physical register to free", head);
       end
       
       head <= head + 1;
@@ -151,7 +151,7 @@ module mkROB(ROB_IFC);
     head  <= 0;
     tail  <= 0;
     count <= 0;
-    $display("[ROB] flushed all entries");
+    if (traceOn) $display("[ROB] flushed all entries");
   endmethod
 
 endmodule

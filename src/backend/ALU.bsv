@@ -52,7 +52,7 @@ package ALU;
       reqQ.clear;
       respQ.clear;
       flushReq[0] <= False;
-      $display("[ALU] flushed in-flight requests/results");
+      if (traceOn) $display("[ALU] flushed in-flight requests/results");
     endrule
 
     rule execute (!flushReq[0]);

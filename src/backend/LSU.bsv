@@ -79,7 +79,7 @@ package LSU;
       Data v = mem.readWord(addr);
       if (!mem.inRange(addr))
         $display("[LSU] Load addr=%h OUT OF RANGE (returns 0)", addr);
-      else
+      else if (traceOn)
         $display("[LSU] Load addr=%h -> word %h", addr, v);
       return v;
     endmethod
@@ -89,7 +89,7 @@ package LSU;
       sqValid[sqTail] <= True;
       sqTail  <= sqTail + 1;
       sqCount <= sqCount + 1;
-      $display("[SQ] alloc rob=%0d in slot %0d", robTag.idx, sqTail);
+      if (traceOn) $display("[SQ] alloc rob=%0d in slot %0d", robTag.idx, sqTail);
     endmethod
 
     method Action sqExecStore(ROBTag robTag, Addr addr, Data rawData, Bit#(3) funct3);
@@ -102,7 +102,7 @@ package LSU;
           e.addr = addr; e.data = pos; e.be = be;
           e.addrReady = True; e.dataReady = True;
           sq[i] <= e;
-          $display("[SQ] exec rob=%0d slot %0d addr=%h be=%b pos-data=%h", robTag.idx, i, addr, be, pos);
+          if (traceOn) $display("[SQ] exec rob=%0d slot %0d addr=%h be=%b pos-data=%h", robTag.idx, i, addr, be, pos);
         end
       end
     endmethod
@@ -113,7 +113,7 @@ package LSU;
       Data    pos = positionStoreData(rawData, off);
       if (mem.inRange(addr)) begin
         mem.writeWord(addr, pos, be);
-        $display("[LSU] Committed store addr=%h be=%b <- raw=%h (positioned=%h)", addr, be, rawData, pos);
+        if (traceOn) $display("[LSU] Committed store addr=%h be=%b <- raw=%h (positioned=%h)", addr, be, rawData, pos);
       end else
         $display("[LSU] Committed store addr=%h OUT OF RANGE (dropped)", addr);
     endmethod
@@ -163,7 +163,7 @@ package LSU;
       sqHead  <= 0;
       sqTail  <= 0;
       sqCount <= 0;
-      $display("[SQ] flushed");
+      if (traceOn) $display("[SQ] flushed");
     endmethod
 
     method Bool sqEmpty()   = (sqCount == 0);

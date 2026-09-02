@@ -68,6 +68,16 @@ package SpeculaCore;
     Reg#(Bool) halted <- mkReg(False);
     Reg#(Bool) flushPending <- mkReg(False);
     Reg#(UInt#(32)) cycleCount <- mkReg(0);
+    Reg#(UInt#(32)) commitCount <- mkReg(0);
+    Reg#(UInt#(32)) storeCommitCount <- mkReg(0);
+    Reg#(UInt#(32)) recoverCount <- mkReg(0);
+
+    function Action printSummary();
+      return action
+        $display("[Specula] summary: cycles=%0d committed=%0d stores=%0d recoveries=%0d",
+                 cycleCount, commitCount, storeCommitCount, recoverCount);
+      endaction;
+    endfunction
 
     Array#(Reg#(Bit#(32))) brPredNextPC  <- mkCReg(2, 0);
     Array#(Reg#(Bool))  brOutstanding    <- mkCReg(2, False);
@@ -95,13 +105,13 @@ package SpeculaCore;
       if (isCF) begin
         brPredNextPC[1] <= predNext;
         cfInFlight[0]   <= True;
-        $display("[FETCH] control-flow @ %h (%s): predicted-next PC = %h",
+        if (traceOn) $display("[FETCH] control-flow @ %h (%s): predicted-next PC = %h",
                  pc, isCondBranch ? "branch" : "jump", predNext);
       end
 
       if (isSerializingInstr(instr)) begin
         serInFlight <= True;
-        $display("[FETCH] SYSTEM @ %h : serializing - fetch frozen until retire", pc);
+        if (traceOn) $display("[FETCH] SYSTEM @ %h : serializing - fetch frozen until retire", pc);
       end
 
       fetch.start(pc);
@@ -131,11 +141,12 @@ package SpeculaCore;
         destTag:   0,
         robTag:    ROBTag{idx: 0}
       });
-      $display("[DISPATCH] Enqueued to buffer: rd=x%0d opcode=%0d", d.rd, d.opcode);
+      if (traceOn) $display("[DISPATCH] Enqueued to buffer: rd=x%0d opcode=%0d", d.rd, d.opcode);
     endrule
 
     rule doRecover (flushPending && !recoveryComplete);
-      $display("[RECOVER] misprediction: flushing backend, restoring rename state, redirect PC -> %h", recoverPC);
+      if (traceOn) $display("[RECOVER] misprediction: flushing backend, restoring rename state, redirect PC -> %h", recoverPC);
+      recoverCount <= recoverCount + 1;
       rob.flushAll;
       rs.flush;
       alu.flush;
@@ -157,7 +168,7 @@ package SpeculaCore;
     endrule
 
     rule doRecoverDone (flushPending && recoveryComplete && !alu.busy);
-      $display("[RECOVER] backend clean, resuming fetch at %h", recoverPC);
+      if (traceOn) $display("[RECOVER] backend clean, resuming fetch at %h", recoverPC);
       flushPending <= False;
       recoveryComplete <= False;
     endrule
@@ -216,7 +227,7 @@ package SpeculaCore;
             robTag:  robTag
           };
           sysArmed <= True;
-          $display("[DISPATCH] %s rob=%0d serialized: csr=%03h f3=%b imm=%0d rd=x%0d",
+          if (traceOn) $display("[DISPATCH] %s rob=%0d serialized: csr=%03h f3=%b imm=%0d rd=x%0d",
                    isMretI ? "MRET" : "CSR", robTag.idx, csrAddr, f3, isImmForm, r.instr.rd);
         end
       end else if (isMemoryOp) begin
@@ -263,7 +274,7 @@ package SpeculaCore;
             funct3: r.instr.funct3,
             robTag: robTag
           });
-          $display("[DISPATCH] %s rob=%0d -> MemQueue (base=x%0d data=x%0d imm=%0d)",
+          if (traceOn) $display("[DISPATCH] %s rob=%0d -> MemQueue (base=x%0d data=x%0d imm=%0d)",
                    isAmo ? "AMOSWAP" : (isLoad ? "LOAD" : "STORE"), robTag.idx, r.instr.rs1, r.instr.rs2, r.instr.imm);
         end
       end else begin
@@ -285,7 +296,7 @@ package SpeculaCore;
             if (isCF) begin
               rename.checkpoint(r.instr.rd != 0 ? tagged Valid tuple2(r.instr.rd, destTag) : tagged Invalid);
               brOutstanding[0] <= True;
-              $display("[DISPATCH] %s rob=%0d : rename + free-list checkpoint taken",
+              if (traceOn) $display("[DISPATCH] %s rob=%0d : rename + free-list checkpoint taken",
                        isJump ? "jump" : "branch", robTag.idx);
             end
 
@@ -312,7 +323,7 @@ package SpeculaCore;
             };
             
             rs.enq(rsEntry);
-            $display("[DISPATCH] Sent to RS: dest=p%0d rob=%0d opcode=%0d", destTag, robTag.idx, r.instr.opcode);
+            if (traceOn) $display("[DISPATCH] Sent to RS: dest=p%0d rob=%0d opcode=%0d", destTag, robTag.idx, r.instr.opcode);
           end
         end
       end
@@ -320,7 +331,7 @@ package SpeculaCore;
 
 
     rule incrementCycles;
-      $display("=== cycle %0d ===", cycleCount);
+      if (traceOn) $display("=== cycle %0d ===", cycleCount);
       cycleCount <= cycleCount + 1;
     endrule
 
@@ -339,6 +350,7 @@ package SpeculaCore;
                       && !memQ.notEmpty && lsu.sqEmpty && !memResultQ.notEmpty
                       && rob.isEmpty());
       $display("[Specula] Simulation complete - all instructions retired");
+      printSummary;
       $finish();
     endrule
 
@@ -350,30 +362,32 @@ package SpeculaCore;
         end else if (entry.completed) begin
           if (entry.isBranch) begin
             if (entry.mispredicted) begin
-              $display("[COMMIT] branch rob=%0d MISPREDICTED -> trigger recovery, redirect PC = %h", tag.idx, entry.redirectPC);
+              if (traceOn) $display("[COMMIT] branch rob=%0d MISPREDICTED -> trigger recovery, redirect PC = %h", tag.idx, entry.redirectPC);
               recoverPC    <= entry.redirectPC;
               flushPending <= True;
             end else begin
-              $display("[COMMIT] branch rob=%0d resolved correctly", tag.idx);
+              if (traceOn) $display("[COMMIT] branch rob=%0d resolved correctly", tag.idx);
             end
           end else if (entry.isStore) begin
             lsu.sqPop();
             if (entry.memAddr == tohostAddr) begin
-              // M2: explicit program termination signal.
               $display("[Specula] tohost store retired: addr=%h data=%0d", entry.memAddr, entry.data);
               if (entry.data == 1)
                 $display("[Specula] TEST PASSED (tohost = 1)");
               else
                 $display("[Specula] TEST FAILED (tohost = %0d)", entry.data);
               $display("[Specula] Simulation complete - terminated by tohost");
+              printSummary;
               $finish(0);
             end else begin
               lsu.storeToMem(entry.memAddr, entry.data, entry.memFunct3);
-              $display("[COMMIT] store rob=%0d retired (addr=%h funct3=%b raw=%h)", tag.idx, entry.memAddr, entry.memFunct3, entry.data);
+              storeCommitCount <= storeCommitCount + 1;
+              if (traceOn) $display("[COMMIT] store rob=%0d retired (addr=%h funct3=%b raw=%h)", tag.idx, entry.memAddr, entry.memFunct3, entry.data);
             end
           end else if (entry.dst matches tagged Valid .dstReg) begin
-            $display("[COMMIT] rob=%0d committed: x%0d <- %0d", tag.idx, dstReg, entry.data);
+            if (traceOn) $display("[COMMIT] rob=%0d committed: x%0d <- %0d", tag.idx, dstReg, entry.data);
           end
+          commitCount <= commitCount + 1;
           rob.commitHead(rename);
         end
       end
@@ -382,7 +396,7 @@ package SpeculaCore;
                       && rob.headTag.idx == sysMeta.robTag.idx);
       if (sysMeta.isMret) begin
         let mr <- csr.doMret();
-        $display("[COMMIT] MRET rob=%0d : pc %h -> %h, priv %b -> %b",
+        if (traceOn) $display("[COMMIT] MRET rob=%0d : pc %h -> %h, priv %b -> %b",
                  sysMeta.robTag.idx, pc, mr.nextPC, priv, mr.nextPriv);
         priv <= mr.nextPriv;
         pc   <= mr.nextPC;
@@ -399,9 +413,10 @@ package SpeculaCore;
           prf.markReady(sysMeta.destTag);
           rs.wakeup(sysMeta.destTag);
         end
-        $display("[COMMIT] CSR rob=%0d : addr=%03h old=%h src=%h new=%h wen=%b rd=x%0d",
+        if (traceOn) $display("[COMMIT] CSR rob=%0d : addr=%03h old=%h src=%h new=%h wen=%b rd=x%0d",
                  sysMeta.robTag.idx, sysMeta.csrAddr, oldv, src, newv, wen, sysMeta.rd);
       end
+      commitCount <= commitCount + 1;
       rob.commitHead(rename);
       sysArmed    <= False;
       serInFlight <= False;
@@ -409,7 +424,7 @@ package SpeculaCore;
 
     rule doExecute (rs.notEmpty && alu.notFull && !flushPending);
       let rsEntry <- rs.deq();
-      $display("[Execute] Dequeued RS entry: op=%0d dest=p%0d rob=%0d", rsEntry.opcode, rsEntry.dest, rsEntry.robTag.idx);
+      if (traceOn) $display("[Execute] Dequeued RS entry: op=%0d dest=p%0d rob=%0d", rsEntry.opcode, rsEntry.dest, rsEntry.robTag.idx);
 
       let src1Val = prf.read(rsEntry.src1);
       let src2Val = prf.read(rsEntry.src2);
@@ -429,7 +444,7 @@ package SpeculaCore;
       };
       
       alu.enq(aluReq);
-      $display("[Execute] Sent to ALU: op=%0d a=%0d b=%0d dest=p%0d rob=%0d (useImm=%0d)", rsEntry.opcode, aVal, bVal, rsEntry.dest, rsEntry.robTag.idx, rsEntry.useImmediate);
+      if (traceOn) $display("[Execute] Sent to ALU: op=%0d a=%0d b=%0d dest=p%0d rob=%0d (useImm=%0d)", rsEntry.opcode, aVal, bVal, rsEntry.dest, rsEntry.robTag.idx, rsEntry.useImmediate);
     endrule
 
     function Vector#(MEMQ_SIZE, Bool) memIssuableMask();
@@ -499,7 +514,7 @@ package SpeculaCore;
           Data rs2v = fromMaybe(0, prf.read(e.sdata));
           lsu.sqExecStore(e.robTag, addr, rs2v, e.funct3);
           memResultQ.enq(MemResult { isLoad: False, isAmo: True, dest: e.dest, data: rs2v, rdData: full, addr: addr, robTag: e.robTag });
-          $display("[MEMQ] amoswap rob=%0d issued: addr=%h old=%h new=%h", e.robTag.idx, addr, full, rs2v);
+          if (traceOn) $display("[MEMQ] amoswap rob=%0d issued: addr=%h old=%h new=%h", e.robTag.idx, addr, full, rs2v);
         end else if (e.isLoad) begin
           match {.covered, .fwdWord} = lsu.sqForward(addr, e.robTag, hTag);
           Data full = fwdWord;
@@ -512,16 +527,16 @@ package SpeculaCore;
               end
           end
           Data result = loadExtract(full, addr[1:0], e.funct3);
-          if (covered != 0)
+          if (traceOn && covered != 0)
             $display("[LSU] Load rob=%0d addr=%h : forwarded lanes=%b fwd=%h merged-word=%h",
                      e.robTag.idx, addr, covered, fwdWord, full);
           memResultQ.enq(MemResult { isLoad: True, isAmo: False, dest: e.dest, data: result, rdData: 0, addr: 0, robTag: e.robTag });
-          $display("[MEMQ] load rob=%0d issued: addr=%h funct3=%b result=%h", e.robTag.idx, addr, e.funct3, result);
+          if (traceOn) $display("[MEMQ] load rob=%0d issued: addr=%h funct3=%b result=%h", e.robTag.idx, addr, e.funct3, result);
         end else begin
           Data sdata = fromMaybe(0, prf.read(e.sdata));
           lsu.sqExecStore(e.robTag, addr, sdata, e.funct3);
           memResultQ.enq(MemResult { isLoad: False, isAmo: False, dest: 0, data: sdata, rdData: 0, addr: addr, robTag: e.robTag });
-          $display("[MEMQ] store rob=%0d issued: addr=%h funct3=%b raw-data=%h", e.robTag.idx, addr, e.funct3, sdata);
+          if (traceOn) $display("[MEMQ] store rob=%0d issued: addr=%h funct3=%b raw-data=%h", e.robTag.idx, addr, e.funct3, sdata);
         end
         memQ.issue(idx);
       end
@@ -554,16 +569,18 @@ package SpeculaCore;
           brOutstanding[1] <= False;
         cfInFlight[1] <= False;
 
-        if (aluResp.isJump)
-          $display("[Writeback] jump rob=%0d : link=%h target=%h predicted-next=%h -> %s",
-                   aluResp.robTag.idx, aluResp.result, actualNextPC, brPredNextPC[0],
-                   mispred ? "REDIRECT" : "sequential");
-        else
-          $display("[Writeback] branch rob=%0d : actualTaken=%0d actual-next=%h predicted-next=%h -> %s",
-                   aluResp.robTag.idx, aluResp.actualTaken, actualNextPC, brPredNextPC[0],
-                   mispred ? "MISPREDICT" : "correct");
+        if (traceOn) begin
+          if (aluResp.isJump)
+            $display("[Writeback] jump rob=%0d : link=%h target=%h predicted-next=%h -> %s",
+                     aluResp.robTag.idx, aluResp.result, actualNextPC, brPredNextPC[0],
+                     mispred ? "REDIRECT" : "sequential");
+          else
+            $display("[Writeback] branch rob=%0d : actualTaken=%0d actual-next=%h predicted-next=%h -> %s",
+                     aluResp.robTag.idx, aluResp.actualTaken, actualNextPC, brPredNextPC[0],
+                     mispred ? "MISPREDICT" : "correct");
+        end
       end else begin
-        $display("[Writeback] ALU result: res=%0d dest=p%0d rob=%0d", aluResp.result, aluResp.dest, aluResp.robTag.idx);
+        if (traceOn) $display("[Writeback] ALU result: res=%0d dest=p%0d rob=%0d", aluResp.result, aluResp.dest, aluResp.robTag.idx);
 
         rob.completeEntry(aluResp.robTag, aluResp.result, 0, False, 0);
 
@@ -573,9 +590,9 @@ package SpeculaCore;
         end
 
         rs.wakeup(aluResp.dest);
-        $display("[Writeback] Waking up instructions waiting for p%0d", aluResp.dest);
+        if (traceOn) $display("[Writeback] Waking up instructions waiting for p%0d", aluResp.dest);
 
-        $display("[Writeback] ROB[%0d] completed with result=%0d, PRF[p%0d] = %0d",
+        if (traceOn) $display("[Writeback] ROB[%0d] completed with result=%0d, PRF[p%0d] = %0d",
                  aluResp.robTag.idx, aluResp.result, aluResp.dest, aluResp.result);
       end
     endrule
@@ -597,16 +614,16 @@ package SpeculaCore;
           prf.markReady(mr.dest);
         end
         rs.wakeup(mr.dest);
-        $display("[Writeback] amoswap rob=%0d : rd p%0d <- %h (mem <- %h)", mr.robTag.idx, mr.dest, mr.rdData, mr.data);
+        if (traceOn) $display("[Writeback] amoswap rob=%0d : rd p%0d <- %h (mem <- %h)", mr.robTag.idx, mr.dest, mr.rdData, mr.data);
       end else if (mr.isLoad) begin
         if (mr.dest != 0) begin
           prf.write(mr.dest, mr.data);
           prf.markReady(mr.dest);
         end
         rs.wakeup(mr.dest);
-        $display("[Writeback] load rob=%0d result -> p%0d = %h", mr.robTag.idx, mr.dest, mr.data);
+        if (traceOn) $display("[Writeback] load rob=%0d result -> p%0d = %h", mr.robTag.idx, mr.dest, mr.data);
       end else begin
-        $display("[Writeback] store rob=%0d marked complete", mr.robTag.idx);
+        if (traceOn) $display("[Writeback] store rob=%0d marked complete", mr.robTag.idx);
       end
     endrule
 

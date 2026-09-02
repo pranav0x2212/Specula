@@ -1,5 +1,7 @@
 package Common;
 
+  Bool traceOn = False;
+
   typedef Bit#(5) RegIndex;
   typedef Bit#(32) Instruction;
   typedef Bit#(32) Data;

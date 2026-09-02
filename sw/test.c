@@ -19,7 +19,7 @@ __attribute__((noreturn)) void main(void){
         && (ram[2] == 0x3579)
         && ((entry1 & 0x7f) == 0x6f)
         && ((unsigned)&main >= 0x80000000)
-        && ((unsigned)&main <  0x80040000);
+        && ((unsigned)&main <  0x88000000);
 
   TOHOST = ok ? 1 : 2;
   __builtin_unreachable();

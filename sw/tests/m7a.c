@@ -18,7 +18,7 @@ __attribute__((noreturn)) void main(void){
   asm volatile("fence rw, w" ::: "memory");
 
   int ok = ((b - a) == 0x1004u)
-        && (c >= 0x80000000u && c < 0x80040000u)
+        && (c >= 0x80000000u && c < 0x88000000u)
         && (r[3] == 0xC0FFEEu)
         && (r[0] == a);
 

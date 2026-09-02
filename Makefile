@@ -11,7 +11,8 @@ BSC      := bsc
 BSC_PATH := +:src:src/common:src/frontend:src/backend:sw
 BSC_FLAGS := +RTS -K512M -RTS -sim -p $(BSC_PATH) -bdir $(OUT_DIR) -info-dir $(OUT_DIR)
 
-MEM_WORDS ?= 65536
+MEM_WORDS ?= 33554432
+IMAGE_PAD_WORDS ?= 262144
 ZERO      := 00000000
 
 RV_PREFIX  ?= riscv32-unknown-elf-
@@ -69,17 +70,14 @@ $(BIN): $(ELF)
 	if [ $$r -gt 0 ]; then head -c $$r /dev/zero >> $@; fi
 
 $(HEX): $(BIN)
-	@echo "[img] $@ <- $< (zero-padded to exactly $(MEM_WORDS) words)"
+	@echo "[img] $@ <- $< (zero-padded to $(IMAGE_PAD_WORDS) words)"
 	@od -An -v -tx4 -w4 $< | awk '{print $$1}' > $@
 	@real=$$(wc -l < $@); \
-	if [ $$real -gt $(MEM_WORDS) ]; then \
-	  echo "ERROR: image is $$real words, exceeds MEM_WORDS=$(MEM_WORDS)"; exit 1; fi; \
-	pad=$$(( $(MEM_WORDS) - real )); \
+	if [ $$real -gt $(IMAGE_PAD_WORDS) ]; then \
+	  echo "ERROR: image is $$real words, exceeds IMAGE_PAD_WORDS=$(IMAGE_PAD_WORDS)"; exit 1; fi; \
+	pad=$$(( $(IMAGE_PAD_WORDS) - real )); \
 	if [ $$pad -gt 0 ]; then yes $(ZERO) | head -n $$pad >> $@; fi; \
-	final=$$(wc -l < $@); \
-	if [ $$final -ne $(MEM_WORDS) ]; then \
-	  echo "ERROR: $@ has $$final lines, expected exactly $(MEM_WORDS)"; exit 1; fi; \
-	echo "[img] $@ : $$final lines ($$real image + $$pad zero)"
+	echo "[img] $@ : $$(wc -l < $@) lines ($$real image + $$pad zero), memory is $(MEM_WORDS) words"
 
 $(IMG_BSV): $(BIN)
 	@bytes=$$(wc -c < $<); words=$$(( (bytes + 3) / 4 )); \

@@ -66,6 +66,7 @@ package SpeculaCore;
 
     Reg#(Bit#(32)) pc <- mkReg(fromInteger(memBaseAddr));
     Reg#(Bool) halted <- mkReg(False);
+    Reg#(Bool) terminating <- mkReg(False);
     Reg#(Bool) flushPending <- mkReg(False);
     Reg#(UInt#(32)) cycleCount <- mkReg(0);
     Reg#(UInt#(32)) commitCount <- mkReg(0);
@@ -90,7 +91,7 @@ package SpeculaCore;
     FIFOF#(Tuple3#(Bit#(32), Decoded, Bit#(32)))     decodedQ <- mkFIFOF();
     FIFOF#(RenamedInstr) renamedInstrQ <- mkSizedFIFOF(8);
 
-    rule doFetch (!halted && !flushPending && !serInFlight && pc < maxPC
+    rule doFetch (!halted && !terminating && !flushPending && !serInFlight && pc < maxPC
                   && !(cfInFlight[0] && isControlFlowInstr(fetch.at(pc).instr)));
       let fs = fetch.at(pc);
       let instr = fs.instr;
@@ -338,15 +339,16 @@ package SpeculaCore;
     rule doHalt (!halted && !flushPending && ((pc >= maxPC
                               && !fetchedQ.notEmpty && !decodedQ.notEmpty
                               && !renamedInstrQ.notEmpty)
-                             || cycleCount > 100000000));
-      if (cycleCount > 100000000)
+                             || cycleCount > fromInteger(maxCycles)));
+      if (cycleCount > fromInteger(maxCycles)) begin
         $display("[Specula] Max cycles reached (%0d), terminating", cycleCount);
-      else
+        terminating <= True;
+      end else
         $display("[Specula] WARNING: fetch reached end of physical memory (%h) without a tohost write - halting", maxPC);
       halted <= True;
     endrule
 
-    rule doTerminate (halted && !flushPending && !rs.notEmpty && !alu.notEmpty
+    rule doTerminate ((halted || terminating) && !flushPending && !rs.notEmpty && !alu.notEmpty
                       && !memQ.notEmpty && lsu.sqEmpty && !memResultQ.notEmpty
                       && rob.isEmpty());
       $display("[Specula] Simulation complete - all instructions retired");

@@ -13,6 +13,7 @@ BSC_FLAGS := +RTS -K512M -RTS -sim -p $(BSC_PATH) -bdir $(OUT_DIR) -info-dir $(O
 
 MEM_WORDS ?= 33554432
 IMAGE_PAD_WORDS ?= 262144
+SIM_MAX_CYCLES ?= 100000000
 ZERO      := 00000000
 
 RV_PREFIX  ?= riscv32-unknown-elf-
@@ -81,8 +82,8 @@ $(HEX): $(BIN)
 
 $(IMG_BSV): $(BIN)
 	@bytes=$$(wc -c < $<); words=$$(( (bytes + 3) / 4 )); \
-	printf '// GENERATED from %s by the Makefile. Do not edit; not tracked.\npackage MemImage;\n  typedef %s MemWords;                 // unified memory size in 32-bit words\n  Integer memBaseAddr = %sh80000000;    // physical base of the unified memory\n  Integer imageWords  = %s;               // real bytes/4 loaded from the ELF\nendpackage\n' "$(SW_SRCS)" "$(MEM_WORDS)" "'" "$$words" > $@; \
-	echo "[img] $@ : MemWords=$(MEM_WORDS) imageWords=$$words"
+	printf '// GENERATED from %s by the Makefile. Do not edit; not tracked.\npackage MemImage;\n  typedef %s MemWords;                 // unified memory size in 32-bit words\n  Integer memBaseAddr = %sh80000000;    // physical base of the unified memory\n  Integer imageWords  = %s;               // real bytes/4 loaded from the ELF\n  Integer maxCycles   = %s;\nendpackage\n' "$(SW_SRCS)" "$(MEM_WORDS)" "'" "$$words" "$(SIM_MAX_CYCLES)" > $@; \
+	echo "[img] $@ : MemWords=$(MEM_WORDS) imageWords=$$words maxCycles=$(SIM_MAX_CYCLES)"
 
 disasm: $(ELF)
 	$(RV_OBJDUMP) -d $<

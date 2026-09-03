@@ -32,6 +32,7 @@ package SystemBus;
     endmethod
 
     method Bool inRange(Addr a) = isUart(a) || isVirtio(a) || ram.inRange(a);
+    method Bit#(32) physReadWord(Addr a) = ram.physReadWord(a);
   endmodule
 
 endpackage

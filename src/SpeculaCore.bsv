@@ -14,6 +14,7 @@ package SpeculaCore;
   import MemQueue::*;
   import BranchPredictor::*;
   import CSRFile::*;
+  import MMU::*;
   import SystemBus::*;
   import FIFOF::*;
   import Vector::*;
@@ -43,6 +44,8 @@ package SpeculaCore;
   module mkSpeculaCore(Empty);
     Memory_IFC mem <- mkSystemBus;
 
+    function Bit#(32) physRd(Bit#(32) a) = mem.physReadWord(a);
+
     IfcFetchUnit fetch <- mkFetchUnit(mem);
     IfcDecodeUnit decodeUnit <- mkDecodeUnit;
     RenameStage_IFC rename <- mkRenameStage;
@@ -68,6 +71,7 @@ package SpeculaCore;
     Reg#(Bool) halted <- mkReg(False);
     Reg#(Bool) terminating <- mkReg(False);
     Reg#(Bool) flushPending <- mkReg(False);
+    Reg#(Bool) mmuFault <- mkReg(False);
     Reg#(UInt#(32)) cycleCount <- mkReg(0);
     Reg#(UInt#(32)) commitCount <- mkReg(0);
     Reg#(UInt#(32)) storeCommitCount <- mkReg(0);
@@ -91,33 +95,41 @@ package SpeculaCore;
     FIFOF#(Tuple3#(Bit#(32), Decoded, Bit#(32)))     decodedQ <- mkFIFOF();
     FIFOF#(RenamedInstr) renamedInstrQ <- mkSizedFIFOF(8);
 
-    rule doFetch (!halted && !terminating && !flushPending && !serInFlight && pc < maxPC
-                  && !(cfInFlight[0] && isControlFlowInstr(fetch.at(pc).instr)));
-      let fs = fetch.at(pc);
-      let instr = fs.instr;
-      let pr <- bp.predict(pc);
-      Bool predTaken = pr.prediction && pr.isValid;
+    rule doFetch (!halted && !terminating && !flushPending && !mmuFault && !serInFlight && pc < maxPC
+                  && !(cfInFlight[0] && isControlFlowInstr(fetch.at(pc, csr.satpValue, priv).instr)));
 
-      Bool isCondBranch = (instr[6:0] == 7'b1100011);
-      Bool isCF         = isControlFlowInstr(instr);
+      let fs = fetch.at(pc, csr.satpValue, priv);
 
-      Bit#(32) predNext = (isCondBranch && predTaken) ? pr.targetAddr : fs.npc;
+      if (fs.fault) begin
+        $display("[MMU] instruction page fault: va=%h priv=%b satp=%h cause=%0d",
+                 pc, priv, csr.satpValue, fs.faultCause);
+        mmuFault <= True;
+      end else begin
+        let instr = fs.instr;
+        let pr <- bp.predict(pc);
+        Bool predTaken = pr.prediction && pr.isValid;
 
-      if (isCF) begin
-        brPredNextPC[1] <= predNext;
-        cfInFlight[0]   <= True;
-        if (traceOn) $display("[FETCH] control-flow @ %h (%s): predicted-next PC = %h",
-                 pc, isCondBranch ? "branch" : "jump", predNext);
+        Bool isCondBranch = (instr[6:0] == 7'b1100011);
+        Bool isCF         = isControlFlowInstr(instr);
+
+        Bit#(32) predNext = (isCondBranch && predTaken) ? pr.targetAddr : fs.npc;
+
+        if (isCF) begin
+          brPredNextPC[1] <= predNext;
+          cfInFlight[0]   <= True;
+          if (traceOn) $display("[FETCH] control-flow @ %h (%s): predicted-next PC = %h",
+                   pc, isCondBranch ? "branch" : "jump", predNext);
+        end
+
+        if (isSerializingInstr(instr)) begin
+          serInFlight <= True;
+          if (traceOn) $display("[FETCH] SYSTEM @ %h : serializing - fetch frozen until retire", pc);
+        end
+
+        fetch.start(pc, fs);
+        fetchedQ.enq(tuple3(pc, instr, fs.npc));
+        pc <= predNext;
       end
-
-      if (isSerializingInstr(instr)) begin
-        serInFlight <= True;
-        if (traceOn) $display("[FETCH] SYSTEM @ %h : serializing - fetch frozen until retire", pc);
-      end
-
-      fetch.start(pc);
-      fetchedQ.enq(tuple3(pc, instr, fs.npc));
-      pc <= predNext;
     endrule
 
     rule doDecode (!flushPending);
@@ -356,6 +368,12 @@ package SpeculaCore;
       $finish();
     endrule
 
+    rule doMmuFaultHalt (mmuFault);
+      $display("[Specula] halted: Sv32 translation fault (non-precise speculative fault model, M17)");
+      printSummary;
+      $finish(0);
+    endrule
+
     rule doCommit (!flushPending);
       let maybeHead = rob.peekHead();
       if (maybeHead matches tagged Valid .headInfo) begin
@@ -475,7 +493,7 @@ package SpeculaCore;
       return any;
     endfunction
 
-    rule doMemIssue (!flushPending && memResultQ.notFull && memIssuableExists);
+    rule doMemIssue (!flushPending && !mmuFault && memResultQ.notFull && memIssuableExists);
       ROBTag hTag = rob.headTag;
       Vector#(MEMQ_SIZE, MemQEntry) entries = memQ.peekAll;
       Vector#(MEMQ_SIZE, Bool)      issuable = memIssuableMask();
@@ -496,13 +514,25 @@ package SpeculaCore;
       if (pick matches tagged Valid .idx) begin
         let e = entries[idx];
         Data baseVal = fromMaybe(0, prf.read(e.base));
-        Addr addr = baseVal + e.imm;
+        Addr vaddr = baseVal + e.imm;
 
-        if (isMisalignedAccess(e.funct3, addr))
+        AccessKind ak = e.isLoad ? DataLoad : DataStore;
+        let tr = sv32Translate(vaddr, ak, priv, csr.satpValue, physRd);
+        Addr addr = tr.pa;
+        Bool xlateFault = tr.fault;
+
+        if (xlateFault) begin
+          $display("[MMU] data page fault: va=%h access=%s priv=%b satp=%h cause=%0d",
+                   vaddr, e.isLoad ? "load" : (e.isAmo ? "amo" : "store"),
+                   priv, csr.satpValue, tr.cause);
+          mmuFault <= True;
+        end
+
+        if (!xlateFault && isMisalignedAccess(e.funct3, addr))
           $display("[LSU] MISALIGNED %s addr=%h funct3=%b - unsupported (M5), operating on the containing word only",
                    e.isLoad ? "load" : "store", addr, e.funct3);
 
-        if (e.isAmo) begin
+        if (!xlateFault && e.isAmo) begin
           match {.covered, .fwdWord} = lsu.sqForward(addr, e.robTag, hTag);
           Data full = fwdWord;
           if (covered != 4'b1111) begin
@@ -517,7 +547,7 @@ package SpeculaCore;
           lsu.sqExecStore(e.robTag, addr, rs2v, e.funct3);
           memResultQ.enq(MemResult { isLoad: False, isAmo: True, dest: e.dest, data: rs2v, rdData: full, addr: addr, robTag: e.robTag });
           if (traceOn) $display("[MEMQ] amoswap rob=%0d issued: addr=%h old=%h new=%h", e.robTag.idx, addr, full, rs2v);
-        end else if (e.isLoad) begin
+        end else if (!xlateFault && e.isLoad) begin
           match {.covered, .fwdWord} = lsu.sqForward(addr, e.robTag, hTag);
           Data full = fwdWord;
           if (covered != 4'b1111) begin
@@ -534,7 +564,7 @@ package SpeculaCore;
                      e.robTag.idx, addr, covered, fwdWord, full);
           memResultQ.enq(MemResult { isLoad: True, isAmo: False, dest: e.dest, data: result, rdData: 0, addr: 0, robTag: e.robTag });
           if (traceOn) $display("[MEMQ] load rob=%0d issued: addr=%h funct3=%b result=%h", e.robTag.idx, addr, e.funct3, result);
-        end else begin
+        end else if (!xlateFault) begin
           Data sdata = fromMaybe(0, prf.read(e.sdata));
           lsu.sqExecStore(e.robTag, addr, sdata, e.funct3);
           memResultQ.enq(MemResult { isLoad: False, isAmo: False, dest: 0, data: sdata, rdData: 0, addr: addr, robTag: e.robTag });

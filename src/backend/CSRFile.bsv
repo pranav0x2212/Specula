@@ -44,6 +44,7 @@ package CSRFile;
     method ActionValue#(MretResult) doMret();
     method Bit#(32) dbgMstatus();
     method Bit#(32) dbgMepc();
+    method Bit#(32) satpValue();
   endinterface
 
   module mkCSRFile(CSRFile_IFC);
@@ -101,6 +102,7 @@ package CSRFile;
 
     method Bit#(32) dbgMstatus() = mstatus;
     method Bit#(32) dbgMepc()    = mepc;
+    method Bit#(32) satpValue()  = satp;
 
   endmodule
 

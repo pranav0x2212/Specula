@@ -12,6 +12,8 @@ package Common;
     Instruction instr;
     Bit#(32)    npc;
     Bool        isComp;
+    Bool        fault;
+    Bit#(4)     faultCause;
   } FetchSlice deriving (Bits, FShow);
 
   typedef enum {

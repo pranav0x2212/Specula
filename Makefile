@@ -37,7 +37,7 @@ IMG_BSV  := sw/MemImage.bsv
 
 # ---------- TARGETS -----------
 
-.PHONY: all run image disasm clean rvctest csrtest uarttest
+.PHONY: all run image disasm clean rvctest csrtest uarttest mmutest
 
 all: $(OUT_DIR)/$(EXE)
 
@@ -60,6 +60,12 @@ uarttest: | $(OUT_DIR)
 	$(BSC) $(BSC_FLAGS) -u -g mkUartTest $(SRC_DIR)/backend/UartTest.bsv
 	$(BSC) $(BSC_FLAGS) -e mkUartTest -o $(OUT_DIR)/uarttest
 	./$(OUT_DIR)/uarttest
+
+# M17: standalone Sv32 page-table-walk bench (no program image needed).
+mmutest: | $(OUT_DIR)
+	$(BSC) $(BSC_FLAGS) -u -g mkMMUTest $(SRC_DIR)/backend/MMUTest.bsv
+	$(BSC) $(BSC_FLAGS) -e mkMMUTest -o $(OUT_DIR)/mmutest
+	./$(OUT_DIR)/mmutest
 
 $(ELF): $(SW_SRCS) $(SW_LD) | $(OUT_DIR)
 	@echo "[img] compiling $(SW_SRCS)"

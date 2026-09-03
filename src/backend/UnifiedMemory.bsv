@@ -2,12 +2,13 @@ package UnifiedMemory;
 
   import RegFile::*;
   import Common::*;
-  import MemImage::*;   
+  import MemImage::*;
 
   interface Memory_IFC;
     method Bit#(32) readWord (Addr byteAddr);
     method Action   writeWord (Addr byteAddr, Bit#(32) data, Bit#(4) be);
     method Bool     inRange  (Addr byteAddr);
+    method Bit#(32) physReadWord (Addr byteAddr);
   endinterface
 
   function Bit#(32) laneMask32(Bit#(4) be);
@@ -18,6 +19,8 @@ package UnifiedMemory;
   module mkMemory(Memory_IFC);
 
     RegFile#(Bit#(TLog#(MemWords)), Bit#(32)) rf <-
+      mkRegFileLoad("image.hex", 0, fromInteger(valueOf(MemWords) - 1));
+    RegFile#(Bit#(TLog#(MemWords)), Bit#(32)) ptw <-
       mkRegFileLoad("image.hex", 0, fromInteger(valueOf(MemWords) - 1));
 
     function Bit#(TLog#(MemWords)) wIdx(Addr a) =
@@ -33,11 +36,15 @@ package UnifiedMemory;
       if (rng(a)) begin
         let old = rf.sub(wIdx(a));
         let m   = laneMask32(be);
-        rf.upd(wIdx(a), (old & ~m) | (d & m));
+        let nw  = (old & ~m) | (d & m);
+        rf.upd (wIdx(a), nw);
+        ptw.upd(wIdx(a), nw);
       end
     endmethod
 
     method Bool inRange(Addr a) = rng(a);
+
+    method Bit#(32) physReadWord(Addr a) = rng(a) ? ptw.sub(wIdx(a)) : 32'h0;
 
   endmodule
 

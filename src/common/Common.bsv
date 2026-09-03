@@ -33,7 +33,8 @@ package Common;
     ALU_BLTU, ALU_BGEU,
     ALU_MUL, ALU_DIVU, ALU_REMU,
     ALU_CSR, ALU_MRET,
-    ALU_AMOSWAP
+    ALU_AMOSWAP,
+    ALU_ECALL, ALU_SRET
   } ALUOp deriving (Bits, Eq, FShow);
 
   typedef struct {
@@ -131,6 +132,10 @@ package Common;
       aluOp = ALU_CSR;   // SYSTEM Zicsr: funct3 001/010/011/101/110/111 = CSRRW/S/C[I]
     end else if (actualOpcode == 7'b1110011 && funct3 == 3'b000 && instr[31:20] == 12'h302) begin
       aluOp = ALU_MRET;  // SYSTEM: MRET
+    end else if (actualOpcode == 7'b1110011 && funct3 == 3'b000 && instr[31:20] == 12'h102) begin
+      aluOp = ALU_SRET;  // SYSTEM: SRET  (M18)
+    end else if (actualOpcode == 7'b1110011 && funct3 == 3'b000 && instr[31:20] == 12'h000) begin
+      aluOp = ALU_ECALL; // SYSTEM: ECALL (M18)
     end else if (actualOpcode == 7'b0101111 && funct3 == 3'b010 && instr[31:27] == 5'b00001) begin
       aluOp = ALU_AMOSWAP;  // RV32A: AMOSWAP.W (aq/rl in bits 26:25 ignored)
     end else begin
@@ -270,16 +275,26 @@ package Common;
     return (op == ALU_MRET);
   endfunction
 
+  function Bool isSretOp(ALUOp op);
+    return (op == ALU_SRET);
+  endfunction
+
+  function Bool isEcallOp(ALUOp op);
+    return (op == ALU_ECALL);
+  endfunction
+
   function Bool isSerializingOp(ALUOp op);
-    return (op == ALU_CSR) || (op == ALU_MRET);
+    return (op == ALU_CSR) || (op == ALU_MRET) || (op == ALU_SRET) || (op == ALU_ECALL);
   endfunction
 
   function Bool isSerializingInstr(Instruction instr);
     Bit#(7) opc = instr[6:0];
     Bit#(3) f3  = instr[14:12];
-    Bool isCsr  = (f3[1:0] != 2'b00);
-    Bool isMret = (f3 == 3'b000) && (instr[31:20] == 12'h302);
-    return (opc == 7'b1110011) && (isCsr || isMret);
+    Bool isCsr   = (f3[1:0] != 2'b00);
+    Bool isMret  = (f3 == 3'b000) && (instr[31:20] == 12'h302);
+    Bool isSret  = (f3 == 3'b000) && (instr[31:20] == 12'h102);
+    Bool isEcall = (f3 == 3'b000) && (instr[31:20] == 12'h000);
+    return (opc == 7'b1110011) && (isCsr || isMret || isSret || isEcall);
   endfunction
   
   function Bool isLoadOp(ALUOp op);

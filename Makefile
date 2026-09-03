@@ -37,7 +37,7 @@ IMG_BSV  := sw/MemImage.bsv
 
 # ---------- TARGETS -----------
 
-.PHONY: all run image disasm clean rvctest csrtest uarttest mmutest
+.PHONY: all run image disasm clean rvctest csrtest uarttest mmutest m18test
 
 all: $(OUT_DIR)/$(EXE)
 
@@ -66,6 +66,9 @@ mmutest: | $(OUT_DIR)
 	$(BSC) $(BSC_FLAGS) -u -g mkMMUTest $(SRC_DIR)/backend/MMUTest.bsv
 	$(BSC) $(BSC_FLAGS) -e mkMMUTest -o $(OUT_DIR)/mmutest
 	./$(OUT_DIR)/mmutest
+
+m18test:
+	$(MAKE) TEST=sw/tests/m18_trap.S RV_ARCH=rv32i_zicsr run
 
 $(ELF): $(SW_SRCS) $(SW_LD) | $(OUT_DIR)
 	@echo "[img] compiling $(SW_SRCS)"

@@ -31,6 +31,9 @@ package SpeculaCore;
 
   typedef struct {
     Bool       isMret;
+    Bool       isSret;
+    Bool       isEcall;
+    Bit#(32)   trapEpc;
     Bit#(12)   csrAddr;
     Bit#(3)    funct3;
     Bit#(5)    rs1Zimm;
@@ -62,6 +65,8 @@ package SpeculaCore;
     Reg#(Bool)      serInFlight <- mkReg(False);  // set at fetch, cleared at commit; freezes fetch
     Reg#(Bool)      sysArmed    <- mkReg(False);  // set at dispatch, cleared at commit; gates the commit handler
     Reg#(SysMeta)   sysMeta     <- mkRegU;
+
+    Wire#(Bool)     supExtReq   <- mkDWire(False);
 
     FIFOF#(MemResult) memResultQ <- mkSizedFIFOF(4);
     Addr      tohostAddr = 32'h00100000;
@@ -202,10 +207,12 @@ package SpeculaCore;
 
       if (isSerializingOp(r.instr.opcode)) begin
         Bool     isMretI   = isMretOp(r.instr.opcode);
+        Bool     isSretI   = isSretOp(r.instr.opcode);
+        Bool     isEcallI  = isEcallOp(r.instr.opcode);
         Bit#(3)  f3        = r.instr.funct3;
         Bool     isImmForm = (f3[2] == 1'b1);
         Bit#(12) csrAddr   = truncate(r.instr.imm);
-        Bool     writesRd  = (!isMretI) && (r.instr.rd != 0);
+        Bool     writesRd  = (!isMretI && !isSretI && !isEcallI) && (r.instr.rd != 0);
 
         PhysRegTag destTag = 0;
         Maybe#(PhysRegTag) oldPhysDst = tagged Invalid;
@@ -230,6 +237,9 @@ package SpeculaCore;
               3'b000);
           sysMeta <= SysMeta {
             isMret:  isMretI,
+            isSret:  isSretI,
+            isEcall: isEcallI,
+            trapEpc: r.pc,
             csrAddr: csrAddr,
             funct3:  f3,
             rs1Zimm: r.instr.rs1,
@@ -241,7 +251,8 @@ package SpeculaCore;
           };
           sysArmed <= True;
           if (traceOn) $display("[DISPATCH] %s rob=%0d serialized: csr=%03h f3=%b imm=%0d rd=x%0d",
-                   isMretI ? "MRET" : "CSR", robTag.idx, csrAddr, f3, isImmForm, r.instr.rd);
+                   isMretI ? "MRET" : (isSretI ? "SRET" : (isEcallI ? "ECALL" : "CSR")),
+                   robTag.idx, csrAddr, f3, isImmForm, r.instr.rd);
         end
       end else if (isMemoryOp) begin
         PhysRegTag destTag = 0;
@@ -420,6 +431,19 @@ package SpeculaCore;
                  sysMeta.robTag.idx, pc, mr.nextPC, priv, mr.nextPriv);
         priv <= mr.nextPriv;
         pc   <= mr.nextPC;
+      end else if (sysMeta.isSret) begin
+        let sr <- csr.doSret();
+        if (traceOn) $display("[COMMIT] SRET rob=%0d : pc -> %h, priv %b -> %b",
+                 sysMeta.robTag.idx, sr.nextPC, priv, sr.nextPriv);
+        priv <= sr.nextPriv;
+        pc   <= sr.nextPC;
+      end else if (sysMeta.isEcall) begin
+        Bit#(6) cause = (priv == 2'b00) ? 6'd8 : ((priv == 2'b01) ? 6'd9 : 6'd11);
+        let tvec <- csr.takeTrap(1'b0, cause, sysMeta.trapEpc, 32'd0, priv);
+        if (traceOn) $display("[COMMIT] ECALL rob=%0d : cause=%0d epc=%h priv %b -> S, pc -> %h",
+                 sysMeta.robTag.idx, cause, sysMeta.trapEpc, priv, tvec);
+        priv <= 2'b01;
+        pc   <= tvec;
       end else begin
         Bit#(32) oldv = csr.csrRead(sysMeta.csrAddr);
         Bit#(32) src  = sysMeta.isImm
@@ -440,6 +464,21 @@ package SpeculaCore;
       rob.commitHead(rename);
       sysArmed    <= False;
       serInFlight <= False;
+    endrule
+
+    rule doTakeExtInt (supExtReq && !halted && !terminating && !flushPending && !mmuFault
+                       && !serInFlight && !sysArmed
+                       && (priv == 2'b00 || priv == 2'b01)
+                       && csr.sstatusSIE && csr.sieSEIE
+                       && rob.isEmpty
+                       && !fetchedQ.notEmpty && !decodedQ.notEmpty && !renamedInstrQ.notEmpty
+                       && !rs.notEmpty && !alu.notEmpty && !memQ.notEmpty
+                       && lsu.sqEmpty && !memResultQ.notEmpty);
+      let tvec <- csr.takeTrap(1'b1, 6'd9, pc, 32'd0, priv);
+      $display("[Specula] supervisor external interrupt taken: epc=%h priv=%b -> S, stvec=%h",
+               pc, priv, tvec);
+      priv <= 2'b01;
+      pc   <= tvec;
     endrule
 
     rule doExecute (rs.notEmpty && alu.notFull && !flushPending);
@@ -637,6 +676,11 @@ package SpeculaCore;
     (* descending_urgency = "doWriteback,    doCommitSys" *)
     (* descending_urgency = "doMemWriteback, doCommitSys" *)
     (* descending_urgency = "doCommitSys,    doCommit"    *)
+    (* descending_urgency = "doCommitSys,    doTakeExtInt" *)
+    (* descending_urgency = "doCommit,       doTakeExtInt" *)
+    (* descending_urgency = "doWriteback,    doTakeExtInt" *)
+    (* descending_urgency = "doMemWriteback, doTakeExtInt" *)
+    (* descending_urgency = "doTakeExtInt,   doFetch"      *)
     rule doMemWriteback (memResultQ.notEmpty);
       let mr = memResultQ.first; memResultQ.deq;
       rob.completeEntry(mr.robTag, mr.data, mr.addr, False, 0);

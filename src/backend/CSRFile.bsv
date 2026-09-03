@@ -13,8 +13,21 @@ package CSRFile;
   Bit#(12) csrSatp     = 12'h180;
   Bit#(12) csrMhartid  = 12'hF14;
 
+  Bit#(12) csrSstatus  = 12'h100;
+  Bit#(12) csrSie      = 12'h104;
+  Bit#(12) csrStvec    = 12'h105;
+  Bit#(12) csrSscratch = 12'h140;
+  Bit#(12) csrSepc     = 12'h141;
+  Bit#(12) csrScause   = 12'h142;
+  Bit#(12) csrStval    = 12'h143;
+  Bit#(12) csrSip      = 12'h144;
+
   Integer mstatusMIE  = 3;    // MIE
   Integer mstatusMPIE = 7;    // MPIE
+  Integer sstatusSIEb  = 1;   // SIE
+  Integer sstatusSPIEb = 5;   // SPIE
+  Integer sstatusSPPb  = 8;   // SPP  (1 = S, 0 = U)
+  Integer sieSEIEb     = 9;   // supervisor external interrupt enable
 
   Bit#(2) privU = 2'b00;
   Bit#(2) privS = 2'b01;
@@ -24,6 +37,11 @@ package CSRFile;
     Bit#(32) nextPC;
     Bit#(2)  nextPriv;
   } MretResult deriving (Bits, FShow);
+
+  typedef struct {
+    Bit#(32) nextPC;
+    Bit#(2)  nextPriv;
+  } SretResult deriving (Bits, FShow);
 
   function Bit#(32) csrNewValue(Bit#(3) funct3, Bit#(32) oldv, Bit#(32) src);
     return (case (funct3[1:0])
@@ -42,6 +60,11 @@ package CSRFile;
     method Bit#(32) csrRead (Bit#(12) addr);
     method Action   csrWrite(Bit#(12) addr, Bit#(32) value);
     method ActionValue#(MretResult) doMret();
+    method ActionValue#(Bit#(32)) takeTrap(Bit#(1) isInterrupt, Bit#(6) cause,
+                                           Bit#(32) epc, Bit#(32) tval, Bit#(2) fromPriv);
+    method ActionValue#(SretResult) doSret();
+    method Bool sstatusSIE();
+    method Bool sieSEIE();
     method Bit#(32) dbgMstatus();
     method Bit#(32) dbgMepc();
     method Bit#(32) satpValue();
@@ -57,6 +80,14 @@ package CSRFile;
     Reg#(Bit#(32)) medeleg  <- mkReg(0);
     Reg#(Bit#(32)) mideleg  <- mkReg(0);
     Reg#(Bit#(32)) satp     <- mkReg(0);
+    Reg#(Bit#(32)) sstatus  <- mkReg(0);
+    Reg#(Bit#(32)) sie      <- mkReg(0);
+    Reg#(Bit#(32)) sip      <- mkReg(0);
+    Reg#(Bit#(32)) stvec    <- mkReg(0);
+    Reg#(Bit#(32)) sscratch <- mkReg(0);
+    Reg#(Bit#(32)) sepc     <- mkReg(0);
+    Reg#(Bit#(32)) scause   <- mkReg(0);
+    Reg#(Bit#(32)) stval    <- mkReg(0);
 
     method Bit#(32) csrRead(Bit#(12) addr);
       return (case (addr)
@@ -68,8 +99,16 @@ package CSRFile;
                 csrMedeleg:  medeleg;
                 csrMideleg:  mideleg;
                 csrSatp:     satp;
-                csrMhartid:  32'h0;     
-                default:     32'h0;    
+                csrMhartid:  32'h0;
+                csrSstatus:  sstatus;
+                csrSie:      sie;
+                csrSip:      sip;
+                csrStvec:    stvec;
+                csrSscratch: sscratch;
+                csrSepc:     sepc;
+                csrScause:   scause;
+                csrStval:    stval;
+                default:     32'h0;
               endcase);
     endmethod
 
@@ -83,8 +122,16 @@ package CSRFile;
         csrMedeleg:  medeleg  <= value;
         csrMideleg:  mideleg  <= value;
         csrSatp:     satp     <= value;
-        csrMhartid:  noAction;          
-        default:     noAction;         
+        csrMhartid:  noAction;
+        csrSstatus:  sstatus  <= value;
+        csrSie:      sie      <= value;
+        csrSip:      sip      <= value;
+        csrStvec:    stvec    <= value;
+        csrSscratch: sscratch <= value;
+        csrSepc:     sepc     <= value;
+        csrScause:   scause   <= value;
+        csrStval:    stval    <= value;
+        default:     noAction;
       endcase
     endmethod
 
@@ -99,6 +146,35 @@ package CSRFile;
       mstatus <= ns;
       return MretResult { nextPC: mepc, nextPriv: mpp };
     endmethod
+
+    method ActionValue#(Bit#(32)) takeTrap(Bit#(1) isInterrupt, Bit#(6) cause,
+                                           Bit#(32) epc, Bit#(32) tval, Bit#(2) fromPriv);
+      scause <= {isInterrupt, 25'd0, cause};
+      sepc   <= epc;
+      stval  <= tval;
+      Bit#(32) ns = sstatus;
+      Bit#(1) oldSIE = ns[sstatusSIEb];
+      ns[sstatusSPPb]  = (fromPriv == privU) ? 1'b0 : 1'b1;  // SPP <- 1 unless trap from U
+      ns[sstatusSPIEb] = oldSIE;                             // SPIE <- SIE
+      ns[sstatusSIEb]  = 1'b0;                               // SIE  <- 0
+      sstatus <= ns;
+      return (stvec & ~32'h3);
+    endmethod
+
+    method ActionValue#(SretResult) doSret();
+      Bit#(1) spp  = sstatus[sstatusSPPb];
+      Bit#(1) spie = sstatus[sstatusSPIEb];
+      Bit#(32) ns = sstatus;
+      ns[sstatusSIEb]  = spie;   // SIE  <- SPIE
+      ns[sstatusSPIEb] = 1'b1;   // SPIE <- 1
+      ns[sstatusSPPb]  = 1'b0;   // SPP  <- U
+      sstatus <= ns;
+      Bit#(2) np = (spp == 1'b1) ? privS : privU;
+      return SretResult { nextPC: sepc, nextPriv: np };
+    endmethod
+
+    method Bool sstatusSIE() = (sstatus[sstatusSIEb] == 1'b1);
+    method Bool sieSEIE()    = (sie[sieSEIEb]        == 1'b1);
 
     method Bit#(32) dbgMstatus() = mstatus;
     method Bit#(32) dbgMepc()    = mepc;

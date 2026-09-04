@@ -16,6 +16,13 @@ IMAGE_PAD_WORDS ?= 262144
 SIM_MAX_CYCLES ?= 100000000
 ZERO      := 00000000
 
+# ---- M20: interactive-UART build (live host terminal instead of uart_rx.in script) ----
+EXE_INTERACTIVE         ?= sim_interactive
+BDIR_INTERACTIVE        := $(OUT_DIR)/interactive
+# Simulated cycles stall while $fgetc() blocks on human input, so this only
+# needs to cover *active* execution between keystrokes; kept generous.
+INTERACTIVE_MAX_CYCLES  ?= 2000000000
+
 RV_PREFIX  ?= riscv32-unknown-elf-
 RV_CC      := $(RV_PREFIX)gcc
 RV_OBJCOPY := $(RV_PREFIX)objcopy
@@ -43,7 +50,7 @@ FS_PAD_WORDS ?= 262144
 
 # ---------- TARGETS -----------
 
-.PHONY: all run image disasm clean rvctest csrtest uarttest mmutest m18test virtiotest
+.PHONY: all run image disasm clean rvctest csrtest uarttest mmutest m18test virtiotest interactive
 
 all: $(OUT_DIR)/$(EXE)
 
@@ -127,9 +134,32 @@ run: all
 	@echo "[3/3] Running simulation"
 	./$(OUT_DIR)/$(EXE) | tee output.txt
 
+# M20: live interactive xv6 shell over the existing UART RX/TX path.
+# Built with -D INTERACTIVE_UART (see src/backend/Uart.bsv) into its own
+# -bdir/-o so it never shares or clobbers the regression build's .bo cache
+# or the default build/sim binary. Only the `maxCycles` line of $(IMG_BSV)
+# is patched (in place, then restored via trap) rather than regenerating the
+# whole file from $(BIN) - image.hex/$(IMG_BSV) here may have been produced
+# out-of-band (e.g. from an xv6 ELF) rather than via the sw/test.c pipeline,
+# and regenerating from $(BIN) would silently overwrite that image.
+$(OUT_DIR)/$(EXE_INTERACTIVE): $(SRC_DIR)/SpeculaCore.bsv $(HEX) $(IMG_BSV) $(FS_HEX) | $(OUT_DIR)
+	@mkdir -p $(BDIR_INTERACTIVE)
+	@set -e; \
+	cp $(IMG_BSV) $(IMG_BSV).interactive-saved; \
+	trap 'mv -f $(IMG_BSV).interactive-saved $(IMG_BSV)' EXIT; \
+	sed -i 's/^  Integer maxCycles.*/  Integer maxCycles   = $(INTERACTIVE_MAX_CYCLES);/' $(IMG_BSV); \
+	echo "[1/2] Compiling $(TOP) (interactive UART, maxCycles=$(INTERACTIVE_MAX_CYCLES))"; \
+	$(BSC) $(BSC_FLAGS) -D INTERACTIVE_UART -bdir $(BDIR_INTERACTIVE) -info-dir $(BDIR_INTERACTIVE) -u -g $(TOP) $(SRC_DIR)/SpeculaCore.bsv; \
+	echo "[2/2] Elaborating (interactive UART)"; \
+	$(BSC) $(BSC_FLAGS) -D INTERACTIVE_UART -bdir $(BDIR_INTERACTIVE) -info-dir $(BDIR_INTERACTIVE) -e $(TOP) -o $(OUT_DIR)/$(EXE_INTERACTIVE)
+
+interactive: $(OUT_DIR)/$(EXE_INTERACTIVE)
+	@scripts/interactive.sh $(OUT_DIR)/$(EXE_INTERACTIVE)
+
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
 
 clean:
 	rm -rf $(OUT_DIR)
 	rm -f $(HEX) $(IMG_BSV) $(FS_HEX) output.txt
+	rm -f uart_rx.in.regression-backup

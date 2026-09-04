@@ -29,6 +29,10 @@ package Uart;
 
     function Action emitByte(Bit#(8) c);
       action
+`ifdef INTERACTIVE_UART
+        $write("%c", c);
+        if (c == 8'h0a) nls <= nls + 1;
+`else
         if (c == 8'h0a) begin
           $write("[UART] ");
           for (Integer i = 0; i < 128; i = i + 1) begin
@@ -42,6 +46,7 @@ package Uart;
           lbuf[lcol] <= c;
           lcol <= lcol + 1;
         end
+`endif
       endaction
     endfunction
 

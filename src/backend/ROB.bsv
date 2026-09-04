@@ -22,16 +22,18 @@ typedef struct {
   Bool isBranch;
   Bool mispredicted;
   Addr redirectPC;
+  Bool faulted;
+  Bit#(4) faultCause;
 } ROBEntry deriving (Bits, FShow);
 
 interface ROB_IFC;
   method Bool canAllocate();
   method Bool isEmpty();
-  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch, Bit#(3) memFunct3);
+  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch, Bit#(3) memFunct3, Bool faulted, Bit#(4) faultCause, Addr faultAddr);
   method Action writeResult(ROBTag tag, Data data);
   method Action markCompleted(ROBTag tag);
   method Action writeResultAndMark(ROBTag tag, Data data);
-  method Action completeEntry(ROBTag tag, Data data, Addr memAddr, Bool mispredicted, Addr redirectPC);
+  method Action completeEntry(ROBTag tag, Data data, Addr memAddr, Bool mispredicted, Addr redirectPC, Bool faulted, Bit#(4) faultCause);
   method Maybe#(Tuple2#(ROBTag, ROBEntry)) peekHead();
   method ROBTag headTag();     
   method Action commitHead(RenameStage_IFC rename);
@@ -58,7 +60,7 @@ module mkROB(ROB_IFC);
     return (count == 0);
   endmethod
 
-  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch, Bit#(3) memFunct3);
+  method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch, Bit#(3) memFunct3, Bool faulted, Bit#(4) faultCause, Addr faultAddr);
     if (!(count < fromInteger(valueOf(NumEntries))))
       $fatal(1, "ROB full!");
 
@@ -71,11 +73,13 @@ module mkROB(ROB_IFC);
       completed: False,
       data: unpack(0),
       isStore: isStore,
-      memAddr: 0,
+      memAddr: faultAddr,
       memFunct3: memFunct3,
       isBranch: isBranch,
       mispredicted: False,
-      redirectPC: 0
+      redirectPC: 0,
+      faulted: faulted,
+      faultCause: faultCause
     };
     completionFlags[tail] <= startCompleted;
     tail <= tail + 1;
@@ -96,12 +100,14 @@ module mkROB(ROB_IFC);
     completionFlags[tag.idx] <= True;
   endmethod
 
-  method Action completeEntry(ROBTag tag, Data data, Addr memAddr, Bool mispredicted, Addr redirectPC);
+  method Action completeEntry(ROBTag tag, Data data, Addr memAddr, Bool mispredicted, Addr redirectPC, Bool faulted, Bit#(4) faultCause);
     let e = robEntries[tag.idx];
     e.data         = data;
     e.memAddr      = memAddr;
     e.mispredicted = mispredicted;
     e.redirectPC   = redirectPC;
+    e.faulted      = faulted;
+    e.faultCause   = faultCause;
     robEntries[tag.idx] <= e;
     completionFlags[tag.idx] <= True;
   endmethod
@@ -122,7 +128,9 @@ module mkROB(ROB_IFC);
         memFunct3: entry.memFunct3,
         isBranch: entry.isBranch,
         mispredicted: entry.mispredicted,
-        redirectPC: entry.redirectPC
+        redirectPC: entry.redirectPC,
+        faulted: entry.faulted,
+        faultCause: entry.faultCause
       };
       result = tagged Valid tuple2(entry.tag, completedEntry);
     end

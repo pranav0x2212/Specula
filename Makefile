@@ -35,9 +35,15 @@ BIN      := $(OUT_DIR)/test.bin
 HEX      := image.hex
 IMG_BSV  := sw/MemImage.bsv
 
+# M19: fs.img backing store for the VirtIO-blk model. Generated from the xv6
+# fs.img when present; a 1-word placeholder otherwise (non-xv6 tests never DMA).
+FS_IMG   ?= ../xv6-rv32/fs.img
+FS_HEX   := fs.hex
+FS_PAD_WORDS ?= 262144
+
 # ---------- TARGETS -----------
 
-.PHONY: all run image disasm clean rvctest csrtest uarttest mmutest m18test
+.PHONY: all run image disasm clean rvctest csrtest uarttest mmutest m18test virtiotest
 
 all: $(OUT_DIR)/$(EXE)
 
@@ -70,6 +76,20 @@ mmutest: | $(OUT_DIR)
 m18test:
 	$(MAKE) TEST=sw/tests/m18_trap.S RV_ARCH=rv32i_zicsr run
 
+# M19: standalone VirtIO-blk + PLIC bench (descriptor walk, used ring, IRQ).
+virtiotest: $(FS_HEX) | $(OUT_DIR)
+	$(BSC) $(BSC_FLAGS) -u -g mkVirtioBlkTest $(SRC_DIR)/backend/VirtioBlkTest.bsv
+	$(BSC) $(BSC_FLAGS) -e mkVirtioBlkTest -o $(OUT_DIR)/virtiotest
+	./$(OUT_DIR)/virtiotest
+
+$(FS_HEX): $(wildcard $(FS_IMG))
+	@if [ -f "$(FS_IMG)" ]; then \
+	  od -An -v -tx4 -w4 "$(FS_IMG)" | awk '{print $$1}' > $@; \
+	  real=$$(wc -l < $@); pad=$$(( $(FS_PAD_WORDS) - real )); \
+	  if [ $$pad -gt 0 ]; then yes $(ZERO) | head -n $$pad >> $@; fi; \
+	  echo "[img] $@ <- $(FS_IMG) ($$real words + $$pad zero)"; \
+	else printf '%s\n' $(ZERO) > $@; echo "[img] $@ : placeholder (no $(FS_IMG))"; fi
+
 $(ELF): $(SW_SRCS) $(SW_LD) | $(OUT_DIR)
 	@echo "[img] compiling $(SW_SRCS)"
 	$(RV_CC) $(RV_CFLAGS) $(RV_LDFLAGS) -o $@ $(SW_SRCS)
@@ -97,7 +117,7 @@ $(IMG_BSV): $(BIN)
 disasm: $(ELF)
 	$(RV_OBJDUMP) -d $<
 
-$(OUT_DIR)/$(EXE): $(SRC_DIR)/SpeculaCore.bsv $(HEX) $(IMG_BSV) | $(OUT_DIR)
+$(OUT_DIR)/$(EXE): $(SRC_DIR)/SpeculaCore.bsv $(HEX) $(IMG_BSV) $(FS_HEX) | $(OUT_DIR)
 	@echo "[1/3] Compiling $(TOP)"
 	$(BSC) $(BSC_FLAGS) -u -g $(TOP) $(SRC_DIR)/SpeculaCore.bsv
 	@echo "[2/3] Elaborating"
@@ -112,4 +132,4 @@ $(OUT_DIR):
 
 clean:
 	rm -rf $(OUT_DIR)
-	rm -f $(HEX) $(IMG_BSV) output.txt
+	rm -f $(HEX) $(IMG_BSV) $(FS_HEX) output.txt

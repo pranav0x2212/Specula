@@ -41,3 +41,6 @@ output.txt
 # ---- generated unified-memory image (from sw/*.c) ----
 /image.hex
 /sw/MemImage.bsv
+
+# ---- M19: generated VirtIO-blk backing store (from ../xv6-rv32/fs.img) ----
+/fs.hex

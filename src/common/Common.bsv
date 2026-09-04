@@ -58,6 +58,8 @@ package Common;
     Bool src2Ready;
     PhysRegTag destTag;
     ROBTag robTag;
+    Bool     faulted;
+    Bit#(4)  faultCause;
   } RenamedInstr deriving (Bits, FShow);
 
   typedef 6 LogNumPhysRegs;

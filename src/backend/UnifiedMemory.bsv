@@ -9,6 +9,8 @@ package UnifiedMemory;
     method Action   writeWord (Addr byteAddr, Bit#(32) data, Bit#(4) be);
     method Bool     inRange  (Addr byteAddr);
     method Bit#(32) physReadWord (Addr byteAddr);
+    method Bool     extIntReq ();
+    method Action   uartRxObserved (Bit#(8) b);
   endinterface
 
   function Bit#(32) laneMask32(Bit#(4) be);
@@ -45,6 +47,9 @@ package UnifiedMemory;
     method Bool inRange(Addr a) = rng(a);
 
     method Bit#(32) physReadWord(Addr a) = rng(a) ? ptw.sub(wIdx(a)) : 32'h0;
+
+    method Bool extIntReq() = False;
+    method Action uartRxObserved(Bit#(8) b) = noAction;
 
   endmodule
 

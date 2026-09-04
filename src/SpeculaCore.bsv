@@ -27,6 +27,8 @@ package SpeculaCore;
     Data       rdData;
     Addr       addr;
     ROBTag     robTag;
+    Bool       faulted;
+    Bit#(4)    faultCause;
   } MemResult deriving (Bits, FShow);
 
   typedef struct {
@@ -63,10 +65,15 @@ package SpeculaCore;
     CSRFile_IFC     csr        <- mkCSRFile;
     Reg#(Bit#(2))   priv       <- mkReg(2'b11);   // reset in M-mode
     Reg#(Bool)      serInFlight <- mkReg(False);  // set at fetch, cleared at commit; freezes fetch
+    Reg#(Bool)      ifFaultInFlight <- mkReg(False);
     Reg#(Bool)      sysArmed    <- mkReg(False);  // set at dispatch, cleared at commit; gates the commit handler
     Reg#(SysMeta)   sysMeta     <- mkRegU;
 
     Wire#(Bool)     supExtReq   <- mkDWire(False);
+
+    rule pumpExtInt;
+      supExtReq <= mem.extIntReq();
+    endrule
 
     FIFOF#(MemResult) memResultQ <- mkSizedFIFOF(4);
     Addr      tohostAddr = 32'h00100000;
@@ -96,19 +103,22 @@ package SpeculaCore;
 
     Array#(Reg#(Bool))  cfInFlight       <- mkCReg(3, False);
 
-    FIFOF#(Tuple3#(Bit#(32), Instruction, Bit#(32))) fetchedQ <- mkFIFOF();
-    FIFOF#(Tuple3#(Bit#(32), Decoded, Bit#(32)))     decodedQ <- mkFIFOF();
+    FIFOF#(Tuple4#(Bit#(32), Instruction, Bit#(32), Maybe#(Bit#(4)))) fetchedQ <- mkFIFOF();
+    FIFOF#(Tuple4#(Bit#(32), Decoded, Bit#(32), Maybe#(Bit#(4))))     decodedQ <- mkFIFOF();
     FIFOF#(RenamedInstr) renamedInstrQ <- mkSizedFIFOF(8);
 
-    rule doFetch (!halted && !terminating && !flushPending && !mmuFault && !serInFlight && pc < maxPC
+    rule doFetch (!halted && !terminating && !flushPending && !mmuFault && !serInFlight && !ifFaultInFlight
+                  && (pc < maxPC || (csr.satpValue[31] == 1'b1 && priv != 2'b11))
                   && !(cfInFlight[0] && isControlFlowInstr(fetch.at(pc, csr.satpValue, priv).instr)));
 
       let fs = fetch.at(pc, csr.satpValue, priv);
 
       if (fs.fault) begin
-        $display("[MMU] instruction page fault: va=%h priv=%b satp=%h cause=%0d",
+        $display("[MMU] instruction page fault (speculative, deferred to commit): va=%h priv=%b satp=%h cause=%0d",
                  pc, priv, csr.satpValue, fs.faultCause);
-        mmuFault <= True;
+        fetchedQ.enq(tuple4(pc, 32'h00000013, pc + 4, tagged Valid fs.faultCause));
+        ifFaultInFlight <= True;
+        pc <= fs.npc;
       end else begin
         let instr = fs.instr;
         let pr <- bp.predict(pc);
@@ -132,20 +142,20 @@ package SpeculaCore;
         end
 
         fetch.start(pc, fs);
-        fetchedQ.enq(tuple3(pc, instr, fs.npc));
+        fetchedQ.enq(tuple4(pc, instr, fs.npc, tagged Invalid));
         pc <= predNext;
       end
     endrule
 
     rule doDecode (!flushPending);
-      match {.fpc, .instr, .fallpc} = fetchedQ.first;
+      match {.fpc, .instr, .fallpc, .flt} = fetchedQ.first;
       fetchedQ.deq;
       decodeUnit.start(instr, fpc);
-      decodedQ.enq(tuple3(fpc, decode(instr, fpc), fallpc));
+      decodedQ.enq(tuple4(fpc, decode(instr, fpc), fallpc, flt));
     endrule
 
     rule doRename (!flushPending && renamedInstrQ.notFull);
-      match {.fpc, .d, .fallpc} = decodedQ.first;
+      match {.fpc, .d, .fallpc, .flt} = decodedQ.first;
       decodedQ.deq;
       rename.start(d);
       renamedInstrQ.enq(RenamedInstr {
@@ -157,7 +167,9 @@ package SpeculaCore;
         src2Tag:   0,
         src2Ready: True,
         destTag:   0,
-        robTag:    ROBTag{idx: 0}
+        robTag:    ROBTag{idx: 0},
+        faulted:    isValid(flt),
+        faultCause: fromMaybe(0, flt)
       });
       if (traceOn) $display("[DISPATCH] Enqueued to buffer: rd=x%0d opcode=%0d", d.rd, d.opcode);
     endrule
@@ -181,6 +193,7 @@ package SpeculaCore;
       brOutstanding[1] <= False;
       cfInFlight[2] <= False;
       serInFlight <= False;
+      ifFaultInFlight <= False;
       sysArmed    <= False;
       recoveryComplete <= True;
     endrule
@@ -193,19 +206,29 @@ package SpeculaCore;
 
     rule doDispatch (renamedInstrQ.notEmpty && !flushPending
                      && rob.canAllocate
-                     && (needsPhysDest(renamedInstrQ.first.instr) ? rename.hasPhysFree : True)
-                     && (isSerializingOp(renamedInstrQ.first.instr.opcode)
-                          ? True
-                          : (isMemoryOp(renamedInstrQ.first.instr.opcode)
-                               ? (memQ.notFull && (isLoadOp(renamedInstrQ.first.instr.opcode) || lsu.sqNotFull))
-                               : rs.notFull))
-                     && !(isControlFlowOp(renamedInstrQ.first.instr.opcode) && brOutstanding[0]));
+                     && (renamedInstrQ.first.faulted
+                          || (needsPhysDest(renamedInstrQ.first.instr) ? rename.hasPhysFree : True))
+                     && (renamedInstrQ.first.faulted
+                          || (isSerializingOp(renamedInstrQ.first.instr.opcode)
+                               ? True
+                               : (isMemoryOp(renamedInstrQ.first.instr.opcode)
+                                    ? (memQ.notFull && (isLoadOp(renamedInstrQ.first.instr.opcode) || lsu.sqNotFull))
+                                    : rs.notFull)))
+                     && (renamedInstrQ.first.faulted
+                          || !(isControlFlowOp(renamedInstrQ.first.instr.opcode) && brOutstanding[0])));
       let r = renamedInstrQ.first;
       Bool isMemoryOp = (r.instr.opcode == ALU_LW) || (r.instr.opcode == ALU_SW) || (r.instr.opcode == ALU_AMOSWAP);
       Bool isLoad = (r.instr.opcode == ALU_LW);
       Bool isAmo  = (r.instr.opcode == ALU_AMOSWAP);
 
-      if (isSerializingOp(r.instr.opcode)) begin
+      if (r.faulted) begin
+        renamedInstrQ.deq;
+        let robTag <- rob.allocate(tagged Invalid, tagged Invalid, tagged Invalid,
+                                   False, True, False, 3'b000,
+                                   True, r.faultCause, r.pc);
+        if (traceOn) $display("[DISPATCH] i-fetch fault rob=%0d : va=%h cause=%0d (poison, deferred to commit)",
+                 robTag.idx, r.pc, r.faultCause);
+      end else if (isSerializingOp(r.instr.opcode)) begin
         Bool     isMretI   = isMretOp(r.instr.opcode);
         Bool     isSretI   = isSretOp(r.instr.opcode);
         Bool     isEcallI  = isEcallOp(r.instr.opcode);
@@ -234,7 +257,8 @@ package SpeculaCore;
               False,   // isStore
               True,    // startCompleted: no execution latency; ROB.commitHead needs the flag set
               False,   // isBranch
-              3'b000);
+              3'b000,
+              False, 0, 0);
           sysMeta <= SysMeta {
             isMret:  isMretI,
             isSret:  isSretI,
@@ -280,7 +304,8 @@ package SpeculaCore;
             !isLoad,
             False,
             False,
-            r.instr.funct3);
+            r.instr.funct3,
+            False, 0, 0);
 
           PhysRegTag basePhys = rename.lookupMapping(r.instr.rs1);
           PhysRegTag dataPhys = rename.lookupMapping(r.instr.rs2);
@@ -315,7 +340,7 @@ package SpeculaCore;
             if (r.instr.rd != 0)
               prf.clear(destTag);
 
-            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd == 0 ? tagged Invalid : tagged Valid destTag), oldPhysDst, False, False, isCF, 3'b000);
+            let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd == 0 ? tagged Invalid : tagged Valid destTag), oldPhysDst, False, False, isCF, 3'b000, False, 0, 0);
 
             if (isCF) begin
               rename.checkpoint(r.instr.rd != 0 ? tagged Valid tuple2(r.instr.rd, destTag) : tagged Invalid);
@@ -360,6 +385,7 @@ package SpeculaCore;
     endrule
 
     rule doHalt (!halted && !flushPending && ((pc >= maxPC
+                              && !(csr.satpValue[31] == 1'b1 && priv != 2'b11)
                               && !fetchedQ.notEmpty && !decodedQ.notEmpty
                               && !renamedInstrQ.notEmpty)
                              || cycleCount > fromInteger(maxCycles)));
@@ -390,6 +416,11 @@ package SpeculaCore;
       if (maybeHead matches tagged Valid .headInfo) begin
         match {.tag, .entry} = headInfo;
         if (sysArmed && tag.idx == sysMeta.robTag.idx) begin
+        end else if (entry.completed && entry.faulted) begin
+          $display("[MMU] page fault at retire (architectural): addr=%h cause=%0d", entry.memAddr, entry.faultCause);
+          $display("[Specula] halted: Sv32 translation fault (non-precise speculative fault model, M17)");
+          printSummary;
+          $finish(0);
         end else if (entry.completed) begin
           if (entry.isBranch) begin
             if (entry.mispredicted) begin
@@ -416,6 +447,7 @@ package SpeculaCore;
               if (traceOn) $display("[COMMIT] store rob=%0d retired (addr=%h funct3=%b raw=%h)", tag.idx, entry.memAddr, entry.memFunct3, entry.data);
             end
           end else if (entry.dst matches tagged Valid .dstReg) begin
+            if (entry.memAddr == 32'h10000000) mem.uartRxObserved(entry.data[7:0]);
             if (traceOn) $display("[COMMIT] rob=%0d committed: x%0d <- %0d", tag.idx, dstReg, entry.data);
           end
           commitCount <= commitCount + 1;
@@ -560,12 +592,10 @@ package SpeculaCore;
         Addr addr = tr.pa;
         Bool xlateFault = tr.fault;
 
-        if (xlateFault) begin
-          $display("[MMU] data page fault: va=%h access=%s priv=%b satp=%h cause=%0d",
-                   vaddr, e.isLoad ? "load" : (e.isAmo ? "amo" : "store"),
-                   priv, csr.satpValue, tr.cause);
-          mmuFault <= True;
-        end
+        if (xlateFault)
+          memResultQ.enq(MemResult { isLoad: e.isLoad, isAmo: e.isAmo, dest: e.dest,
+                                     data: 0, rdData: 0, addr: vaddr, robTag: e.robTag,
+                                     faulted: True, faultCause: tr.cause });
 
         if (!xlateFault && isMisalignedAccess(e.funct3, addr))
           $display("[LSU] MISALIGNED %s addr=%h funct3=%b - unsupported (M5), operating on the containing word only",
@@ -584,7 +614,7 @@ package SpeculaCore;
           end
           Data rs2v = fromMaybe(0, prf.read(e.sdata));
           lsu.sqExecStore(e.robTag, addr, rs2v, e.funct3);
-          memResultQ.enq(MemResult { isLoad: False, isAmo: True, dest: e.dest, data: rs2v, rdData: full, addr: addr, robTag: e.robTag });
+          memResultQ.enq(MemResult { isLoad: False, isAmo: True, dest: e.dest, data: rs2v, rdData: full, addr: addr, robTag: e.robTag, faulted: False, faultCause: 0 });
           if (traceOn) $display("[MEMQ] amoswap rob=%0d issued: addr=%h old=%h new=%h", e.robTag.idx, addr, full, rs2v);
         end else if (!xlateFault && e.isLoad) begin
           match {.covered, .fwdWord} = lsu.sqForward(addr, e.robTag, hTag);
@@ -601,12 +631,12 @@ package SpeculaCore;
           if (traceOn && covered != 0)
             $display("[LSU] Load rob=%0d addr=%h : forwarded lanes=%b fwd=%h merged-word=%h",
                      e.robTag.idx, addr, covered, fwdWord, full);
-          memResultQ.enq(MemResult { isLoad: True, isAmo: False, dest: e.dest, data: result, rdData: 0, addr: 0, robTag: e.robTag });
+          memResultQ.enq(MemResult { isLoad: True, isAmo: False, dest: e.dest, data: result, rdData: 0, addr: addr, robTag: e.robTag, faulted: False, faultCause: 0 });
           if (traceOn) $display("[MEMQ] load rob=%0d issued: addr=%h funct3=%b result=%h", e.robTag.idx, addr, e.funct3, result);
         end else if (!xlateFault) begin
           Data sdata = fromMaybe(0, prf.read(e.sdata));
           lsu.sqExecStore(e.robTag, addr, sdata, e.funct3);
-          memResultQ.enq(MemResult { isLoad: False, isAmo: False, dest: 0, data: sdata, rdData: 0, addr: addr, robTag: e.robTag });
+          memResultQ.enq(MemResult { isLoad: False, isAmo: False, dest: 0, data: sdata, rdData: 0, addr: addr, robTag: e.robTag, faulted: False, faultCause: 0 });
           if (traceOn) $display("[MEMQ] store rob=%0d issued: addr=%h funct3=%b raw-data=%h", e.robTag.idx, addr, e.funct3, sdata);
         end
         memQ.issue(idx);
@@ -620,7 +650,7 @@ package SpeculaCore;
         Bit#(32) actualNextPC = aluResp.actualTaken ? aluResp.actualTarget : aluResp.fallPC;
         Bool mispred = (actualNextPC != brPredNextPC[0]);
 
-        rob.completeEntry(aluResp.robTag, aluResp.result, 0, mispred, actualNextPC);
+        rob.completeEntry(aluResp.robTag, aluResp.result, 0, mispred, actualNextPC, False, 0);
 
         if (aluResp.dest != 0) begin
           prf.write(aluResp.dest, aluResp.result);
@@ -653,7 +683,7 @@ package SpeculaCore;
       end else begin
         if (traceOn) $display("[Writeback] ALU result: res=%0d dest=p%0d rob=%0d", aluResp.result, aluResp.dest, aluResp.robTag.idx);
 
-        rob.completeEntry(aluResp.robTag, aluResp.result, 0, False, 0);
+        rob.completeEntry(aluResp.robTag, aluResp.result, 0, False, 0, False, 0);
 
         if (aluResp.dest != 0) begin
           prf.write(aluResp.dest, aluResp.result);
@@ -683,7 +713,7 @@ package SpeculaCore;
     (* descending_urgency = "doTakeExtInt,   doFetch"      *)
     rule doMemWriteback (memResultQ.notEmpty);
       let mr = memResultQ.first; memResultQ.deq;
-      rob.completeEntry(mr.robTag, mr.data, mr.addr, False, 0);
+      rob.completeEntry(mr.robTag, mr.data, mr.addr, False, 0, mr.faulted, mr.faultCause);
       if (mr.isAmo) begin
         if (mr.dest != 0) begin
           prf.write(mr.dest, mr.rdData);

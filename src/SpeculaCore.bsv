@@ -125,9 +125,14 @@ package SpeculaCore;
         Bool predTaken = pr.prediction && pr.isValid;
 
         Bool isCondBranch = (instr[6:0] == 7'b1100011);
+        Bool isJal        = (instr[6:0] == 7'b1101111);
+        Bool isJalr       = (instr[6:0] == 7'b1100111);
         Bool isCF         = isControlFlowInstr(instr);
-
-        Bit#(32) predNext = (isCondBranch && predTaken) ? pr.targetAddr : fs.npc;
+        Bit#(32) jalTarget = pc + jalImmediate(instr);
+        Bit#(32) predNext =
+            isJal  ? jalTarget :
+            isJalr ? (pr.btbHit ? pr.btbTarget : fs.npc) :
+            (isCondBranch && predTaken) ? pr.targetAddr : fs.npc;
 
         if (isCF) begin
           brPredNextPC[1] <= predNext;
@@ -658,7 +663,9 @@ package SpeculaCore;
         end
         rs.wakeup(aluResp.dest);
 
-        if (!aluResp.isJump)
+        if (aluResp.isJalr)
+          bp.updateBtb(aluResp.pc, aluResp.actualTarget);
+        else if (!aluResp.isJump)
           bp.update(BranchUpdate {
             pc:         aluResp.pc,
             targetAddr: aluResp.actualTarget,

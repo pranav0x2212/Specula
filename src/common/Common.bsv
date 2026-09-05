@@ -175,8 +175,7 @@ package Common;
       imm = signExtend13(branchImm);
       rs2Field = instr[24:20];  // B-type uses rs2
     end else if (actualOpcode == 7'b1101111) begin  // JAL - J-type immediate (21-bit, LSB 0)
-      Bit#(21) jalImm = {instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
-      imm = signExtend21(jalImm);
+      imm = jalImmediate(instr);
       rs2Field = 0;
     end else if (actualOpcode == 7'b1100111) begin  // JALR - I-type immediate
       imm = signExtend(instr[31:20]);
@@ -233,6 +232,11 @@ package Common;
     else
       extended = {11'h000, imm21};
     return extended;
+  endfunction
+
+  function Bit#(32) jalImmediate(Instruction instr);
+    Bit#(21) jalImm = {instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
+    return signExtend21(jalImm);
   endfunction
 
   function Bool signedLT(Bit#(32) a, Bit#(32) b);

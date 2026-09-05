@@ -26,6 +26,7 @@ package ALU;
     ROBTag robTag;
     Bool isBranch;
     Bool isJump;
+    Bool isJalr;
     Bool actualTaken;
     Data actualTarget;
     Bit#(32) pc;
@@ -61,6 +62,7 @@ package ALU;
       Data res = 32'd0;
       Bool isBranch = False;
       Bool isJump = False;
+      Bool isJalr = False;
       Bool actualTaken = False;
       Data actualTarget = 32'd0;
 
@@ -87,7 +89,7 @@ package ALU;
           res = r.fallPC;
         end
         ALU_JALR: begin
-          isBranch = True; isJump = True; actualTaken = True;
+          isBranch = True; isJump = True; isJalr = True; actualTaken = True;
           actualTarget = (r.a + r.branchOffset) & 32'hFFFFFFFE;
           res = r.fallPC;
         end
@@ -136,6 +138,7 @@ package ALU;
         robTag: r.robTag,
         isBranch: isBranch,
         isJump: isJump,
+        isJalr: isJalr,
         actualTaken: actualTaken,
         actualTarget: actualTarget,
         pc: r.pc,

@@ -14,6 +14,8 @@ package BranchPredictor;
     Bool prediction;
     Bool isValid;
     Addr targetAddr;
+    Bool btbHit;
+    Addr btbTarget;
   } PredictionResult deriving (Bits, Eq, FShow);
 
   typedef struct {
@@ -26,6 +28,7 @@ package BranchPredictor;
   interface BranchPredictor_IFC;
     method ActionValue#(PredictionResult) predict (Addr pc);
     method Action update(BranchUpdate upd);
+    method Action updateBtb(Addr pc, Addr target);
     method Action flushHistory;
   endinterface
 
@@ -47,10 +50,18 @@ package BranchPredictor;
       Addr target = btb_hit ? btb_target : (pc + 4);
 
       return PredictionResult {
-        prediction: predicted_taken, 
+        prediction: predicted_taken,
         targetAddr: predicted_taken ? target : (pc + 4),
-        isValid: btb_hit && predicted_taken
+        isValid: btb_hit && predicted_taken,
+        btbHit: btb_hit,
+        btbTarget: target
       };
+    endmethod
+
+    method Action updateBtb(Addr pc, Addr target);
+      Bit#(4) btb_idx = truncate(pc >> 2);
+      Bit#(24) btb_tag = truncate(pc >> 6);
+      btb[btb_idx] <= tuple3(True, btb_tag, target);
     endmethod
 
     method Action update(BranchUpdate upd);

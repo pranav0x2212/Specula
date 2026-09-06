@@ -1,38 +1,56 @@
 package FetchUnit;
 
   import Common::*;
-  import RegFile::*;
+  import UnifiedMemory::*;
+  import RVCExpand::*;
+  import MMU::*;
 
   interface IfcFetchUnit;
-    method Action start(Bit#(32) pc);
-    method Instruction getFetched();
+    method Action     start(Bit#(32) pc, FetchSlice fs);
+    method FetchSlice at(Bit#(32) pc, Bit#(32) satp, Bit#(2) priv);
   endinterface
 
-  module mkFetchUnit(IfcFetchUnit);
-    Reg#(Bit#(32)) pcReg <- mkReg(0);
-    Reg#(Instruction) fetchedInstr <- mkReg(0);
-    Reg#(Bool) started <- mkReg(False);
+  module mkFetchUnit#(Memory_IFC mem)(IfcFetchUnit);
 
-    let maxPC = 32'h00000100;
+    function Bit#(32) physRd(Bit#(32) a) = mem.physReadWord(a);
 
-    RegFile#(Bit#(32), Instruction) imem <- mkRegFileFull();
+    function FetchSlice slice(Bit#(32) vpc, Bit#(32) satp, Bit#(2) priv);
+      FetchSlice fs = FetchSlice { instr: 32'h00000013, npc: vpc + 4,
+                                   isComp: False, fault: False, faultCause: 0 };
 
-    rule preload;
-      imem.upd(0, 32'h00508193);
-      noAction;
-    endrule
+      let t0 = sv32Translate(vpc, InstFetch, priv, satp, physRd);
+      if (t0.fault) begin
+        fs.instr = 32'h0;
+        fs.fault = True;
+        fs.faultCause = t0.cause;
+      end else begin
+        Bit#(32) w0     = mem.readWord(t0.pa);
+        Bit#(16) parcel = (vpc[1] == 1'b1) ? w0[31:16] : w0[15:0];
 
-    method Action start(Bit#(32) pc);
-      pcReg <= pc;
-      let instr = getInstruction(pc);
-      fetchedInstr <= instr;
-      $display("[Fetch] PC: %08x | instr: %08x", pc, instr);
-      started <= True;
+        if (isCompressedParcel(parcel)) begin
+          fs.instr  = expandRVC(parcel);
+          fs.npc    = vpc + 2;
+          fs.isComp = True;
+        end else begin
+          Bit#(16) hi = (vpc[1] == 1'b1) ? mem.readWord(t0.pa + 4)[15:0]
+                                         : w0[31:16];
+          fs.instr  = { hi, parcel };
+          fs.npc    = vpc + 4;
+          fs.isComp = False;
+        end
+      end
+      return fs;
+    endfunction
+
+    method Action start(Bit#(32) pc, FetchSlice fs);
+      if (traceOn) $display("[Fetch] PC: %08x | %s | instr: %08x%s",
+               pc, fs.isComp ? "c16" : "i32", fs.instr, fs.fault ? " (xlate fault)" : "");
     endmethod
-    
-    method Instruction getFetched();
-      return fetchedInstr;
+
+    method FetchSlice at(Bit#(32) pc, Bit#(32) satp, Bit#(2) priv);
+      return slice(pc, satp, priv);
     endmethod
+
   endmodule
 
 endpackage

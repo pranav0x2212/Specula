@@ -12,7 +12,8 @@ package RenameStage;
     method PhysRegTag lookupMapping(RegIndex r);
     method Bool isWritten(RegIndex r);
     method Action freeReg(PhysRegTag tag);
-    method Action checkpoint();
+    method Bool hasPhysFree();
+    method Action checkpoint(Maybe#(Tuple2#(RegIndex, PhysRegTag)) alloc);
     method Action restoreCheckpoint();
   endinterface
 
@@ -24,11 +25,10 @@ package RenameStage;
     Reg#(Decoded) currentInstr <- mkRegU;
     Reg#(Vector#(32, PhysRegTag))            shadowMap     <- mkRegU;
     Reg#(Vector#(32, Bool))                  shadowWritten <- mkRegU;
-    Reg#(Vector#(NUM_PHYS_REGS, Bool))       shadowFree    <- mkRegU;
 
     method Action start(Decoded d);
       currentInstr <= d;
-      $display("[RENAME] Storing decoded instr: opcode=%0d rd=x%0d rs1=x%0d", d.opcode, d.rd, d.rs1);
+      if (traceOn) $display("[RENAME] Storing decoded instr: opcode=%0d rd=x%0d rs1=x%0d", d.opcode, d.rd, d.rs1);
     endmethod
 
     method Decoded getCurrent();
@@ -50,7 +50,7 @@ package RenameStage;
           end
           archRegMap[rd] <= destTag;
           archRegWritten[rd] <= True;
-          $display("[RENAME] Allocated p%0d for x%0d", tag, rd);
+          if (traceOn) $display("[RENAME] Allocated p%0d for x%0d", tag, rd);
         end else begin
           success = False;
           $display("[RENAME] No free physical registers for x%0d", rd);
@@ -66,7 +66,7 @@ package RenameStage;
       if (rd != 0) begin
         archRegMap[rd] <= physTag;
         archRegWritten[rd] <= True;
-        $display("[RENAME] Updated mapping: x%0d -> p%0d", rd, physTag);
+        if (traceOn) $display("[RENAME] Updated mapping: x%0d -> p%0d", rd, physTag);
       end
     endmethod
 
@@ -80,21 +80,38 @@ package RenameStage;
 
     method Action freeReg(PhysRegTag tag);
       freelist.free(tag);
-      $display("[RENAME] Freed physical register p%0d", tag);
+      if (traceOn) $display("[RENAME] Freed physical register p%0d", tag);
     endmethod
 
-    method Action checkpoint();
-      shadowMap     <= readVReg(archRegMap);
-      shadowWritten <= readVReg(archRegWritten);
-      shadowFree    <= freelist.snapshot();
-      $display("[RENAME] checkpoint taken");
+    method Bool hasPhysFree() = freelist.hasFree();
+
+    method Action checkpoint(Maybe#(Tuple2#(RegIndex, PhysRegTag)) alloc);
+      Vector#(32, PhysRegTag)      m = readVReg(archRegMap);
+      Vector#(32, Bool)            w = readVReg(archRegWritten);
+      if (alloc matches tagged Valid {.rd, .tag} &&& rd != 0) begin
+        m[rd]  = tag;
+        w[rd]  = True;
+      end
+      shadowMap     <= m;
+      shadowWritten <= w;
+      if (traceOn) $display("[RENAME] checkpoint taken");
     endmethod
 
     method Action restoreCheckpoint();
       writeVReg(archRegMap, shadowMap);
       writeVReg(archRegWritten, shadowWritten);
-      freelist.restore(shadowFree);
-      $display("[RENAME] rename map + free list restored from checkpoint");
+      Vector#(32, PhysRegTag)     sm = shadowMap;
+      Vector#(32, Bool)           sw = shadowWritten;
+      Vector#(NUM_PHYS_REGS, Bool) freeVec = newVector;
+      for (Integer p = 0; p < valueOf(NUM_PHYS_REGS); p = p + 1) begin
+        Bool referenced = False;
+        for (Integer r = 1; r < 32; r = r + 1)
+          if (sw[r] && sm[r] == fromInteger(p))
+            referenced = True;
+        freeVec[p] = !referenced;
+      end
+      freelist.restoreExact(freeVec);
+      if (traceOn) $display("[RENAME] rename map + free list restored from checkpoint");
     endmethod
 
   endmodule

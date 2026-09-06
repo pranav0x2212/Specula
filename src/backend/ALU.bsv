@@ -16,6 +16,7 @@ package ALU;
     PhysRegTag dest;
     ROBTag robTag;
     Bit#(32) pc;
+    Bit#(32) fallPC;
     Bit#(32) branchOffset;
   } ALUReq deriving (Bits, FShow);
 
@@ -24,9 +25,12 @@ package ALU;
     PhysRegTag dest;
     ROBTag robTag;
     Bool isBranch;
+    Bool isJump;
+    Bool isJalr;
     Bool actualTaken;
     Data actualTarget;
     Bit#(32) pc;
+    Bit#(32) fallPC;
   } ALUResp deriving (Bits, FShow);
 
   interface ALU_IFC;
@@ -49,7 +53,7 @@ package ALU;
       reqQ.clear;
       respQ.clear;
       flushReq[0] <= False;
-      $display("[ALU] flushed in-flight requests/results");
+      if (traceOn) $display("[ALU] flushed in-flight requests/results");
     endrule
 
     rule execute (!flushReq[0]);
@@ -57,14 +61,38 @@ package ALU;
 
       Data res = 32'd0;
       Bool isBranch = False;
+      Bool isJump = False;
+      Bool isJalr = False;
       Bool actualTaken = False;
       Data actualTarget = 32'd0;
-      
-      case (r.opcode) 
+
+      case (r.opcode)
         ALU_ADD: res = r.a + r.b;
         ALU_SUB: res = r.a - r.b;
         ALU_AND: res = r.a & r.b;
         ALU_OR: res = r.a | r.b;
+        ALU_XOR: res = r.a ^ r.b;
+        ALU_SLL: res = r.a << r.b[4:0];
+        ALU_SRL: res = r.a >> r.b[4:0];
+        ALU_SRA: res = signedShiftRight(r.a, r.b[4:0]);
+        ALU_SLT:  res = signedLT(r.a, r.b) ? 32'd1 : 32'd0;
+        ALU_SLTU: res = (r.a < r.b)        ? 32'd1 : 32'd0;
+        ALU_LUI: res = r.b;
+        ALU_AUIPC: res = r.pc + r.branchOffset;
+        ALU_NOP: res = 32'd0;
+        ALU_MUL:  res = r.a * r.b;
+        ALU_DIVU: res = (r.b == 0) ? 32'hFFFFFFFF : (r.a / r.b);
+        ALU_REMU: res = (r.b == 0) ? r.a : (r.a % r.b);
+        ALU_JAL: begin
+          isBranch = True; isJump = True; actualTaken = True;
+          actualTarget = r.pc + r.branchOffset;
+          res = r.fallPC;
+        end
+        ALU_JALR: begin
+          isBranch = True; isJump = True; isJalr = True; actualTaken = True;
+          actualTarget = (r.a + r.branchOffset) & 32'hFFFFFFFE;
+          res = r.fallPC;
+        end
         ALU_BEQ: begin
           isBranch = True;
           actualTaken = (r.a == r.b);
@@ -89,6 +117,18 @@ package ALU;
           actualTarget = r.pc + r.branchOffset;
           res = 0;
         end
+        ALU_BLTU: begin
+          isBranch = True;
+          actualTaken = (r.a < r.b);
+          actualTarget = r.pc + r.branchOffset;
+          res = 0;
+        end
+        ALU_BGEU: begin
+          isBranch = True;
+          actualTaken = (r.a >= r.b);
+          actualTarget = r.pc + r.branchOffset;
+          res = 0;
+        end
         default: res = 32'd0;
       endcase
 
@@ -97,9 +137,12 @@ package ALU;
         dest: r.dest,
         robTag: r.robTag,
         isBranch: isBranch,
+        isJump: isJump,
+        isJalr: isJalr,
         actualTaken: actualTaken,
         actualTarget: actualTarget,
-        pc: r.pc
+        pc: r.pc,
+        fallPC: r.fallPC
       };
       respQ.enq(out);
     endrule

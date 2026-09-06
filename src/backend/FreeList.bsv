@@ -7,8 +7,7 @@ package FreeList;
     method ActionValue#(Maybe#(PhysRegTag)) tryAllocate();
     method Action free(PhysRegTag tag);
     method Bool hasFree();
-    method Vector#(NUM_PHYS_REGS, Bool) snapshot();
-    method Action restore(Vector#(NUM_PHYS_REGS, Bool) snap);
+    method Action restoreExact(Vector#(NUM_PHYS_REGS, Bool) freeVec);
   endinterface
 
   module mkFreeList(FreeList_IFC);
@@ -47,13 +46,9 @@ package FreeList;
       return foldl(orFn, False, readVReg(freelist));
     endmethod
 
-    method Vector#(NUM_PHYS_REGS, Bool) snapshot();
-      return readVReg(freelist);
-    endmethod
-    
-    method Action restore(Vector#(NUM_PHYS_REGS, Bool) snap);
+    method Action restoreExact(Vector#(NUM_PHYS_REGS, Bool) freeVec);
       for (Integer i = 1; i < valueOf(NUM_PHYS_REGS); i = i + 1)
-        freelist[i] <= snap[i] || freelist[i];
+        freelist[i] <= freeVec[i];
     endmethod
 
   endmodule

@@ -37,3 +37,14 @@ bsc.dir/
 
 # Simulation output
 output.txt
+
+# ---- M20: interactive-mode UART FIFO bookkeeping ----
+/uart_rx.in.regression-backup
+/sw/MemImage.bsv.interactive-saved
+
+# ---- generated unified-memory image (from sw/*.c) ----
+/image.hex
+/sw/MemImage.bsv
+
+# ---- M19: generated VirtIO-blk backing store (from ../xv6-rv32/fs.img) ----
+/fs.hex

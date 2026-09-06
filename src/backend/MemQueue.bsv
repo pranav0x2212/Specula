@@ -8,10 +8,12 @@ package MemQueue;
 
   typedef struct {
     Bool       isLoad;
-    PhysRegTag base;   
-    PhysRegTag sdata;   
-    Data       imm;     
-    PhysRegTag dest;   
+    Bool       isAmo;
+    PhysRegTag base;
+    PhysRegTag sdata;
+    Data       imm;
+    PhysRegTag dest;
+    Bit#(3)    funct3;
     ROBTag     robTag;
   } MemQEntry deriving (Bits, FShow);
 
@@ -41,8 +43,8 @@ package MemQueue;
       if (f matches tagged Valid .idx) begin
         payload[idx]  <= e;
         valid[idx][1] <= True;
-        $display("[MEMQ] enq %s rob=%0d base=p%0d sdata=p%0d dest=p%0d imm=%0d",
-                 e.isLoad ? "load" : "store", e.robTag.idx, e.base, e.sdata, e.dest, e.imm);
+        if (traceOn) $display("[MEMQ] enq %s rob=%0d base=p%0d sdata=p%0d dest=p%0d imm=%0d funct3=%b",
+                 e.isAmo ? "amoswap" : (e.isLoad ? "load" : "store"), e.robTag.idx, e.base, e.sdata, e.dest, e.imm, e.funct3);
       end else
         $display("[MEMQ] enq FAILED: full");
     endmethod
@@ -72,13 +74,13 @@ package MemQueue;
 
     method Action issue(MemQIdx i);
       valid[i][0] <= False;
-      $display("[MEMQ] issue slot %0d (rob=%0d)", i, payload[i].robTag.idx);
+      if (traceOn) $display("[MEMQ] issue slot %0d (rob=%0d)", i, payload[i].robTag.idx);
     endmethod
 
     method Action flush();
       for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1)
         valid[i][2] <= False;
-      $display("[MEMQ] flushed");
+      if (traceOn) $display("[MEMQ] flushed");
     endmethod
 
   endmodule

@@ -48,7 +48,7 @@ package ReservationStation;
 
     method Action enq(RSEntry entry);
       let f = firstFree();
-      $display("[RS][ENQ] opcode=%0d dest=p%0d src1=p%0d(r%0d) src2=p%0d(r%0d) rob=%0d",
+      if (traceOn) $display("[RS][ENQ] opcode=%0d dest=p%0d src1=p%0d(r%0d) src2=p%0d(r%0d) rob=%0d",
                entry.opcode, entry.dest, entry.src1, entry.src1Ready,
                entry.src2, entry.src2Ready, entry.robTag.idx);
       if (f matches tagged Valid .idx) begin
@@ -56,7 +56,7 @@ package ReservationStation;
         valid[idx][1]   <= True;             // port 1
         s1Ready[idx][2] <= entry.src1Ready;  // port 2
         s2Ready[idx][2] <= entry.src2Ready;  // port 2
-        $display("[RS][ENQ] placed in slot %0d", idx);
+        if (traceOn) $display("[RS][ENQ] placed in slot %0d", idx);
       end else
         $display("[RS][ENQ] FAILED: RS full");
     endmethod
@@ -68,10 +68,10 @@ package ReservationStation;
         RSEntry e = payload[idx];
         e.src1Ready = True;
         e.src2Ready = True;
-        $display("[RS][DEQ] slot %0d opcode=%0d dest=p%0d rob=%0d", idx, e.opcode, e.dest, e.robTag.idx);
+        if (traceOn) $display("[RS][DEQ] slot %0d opcode=%0d dest=p%0d rob=%0d", idx, e.opcode, e.dest, e.robTag.idx);
         return e;
       end else begin
-        $display("[RS][DEQ] attempted but no ready entry");
+        if (traceOn) $display("[RS][DEQ] attempted but no ready entry");
         return ?;
       end
     endmethod
@@ -82,7 +82,7 @@ package ReservationStation;
     method Action flush();
       for (Integer i = 0; i < valueOf(RS_SIZE); i = i + 1)
         valid[i][2] <= False;
-      $display("[RS] flushed all entries");
+      if (traceOn) $display("[RS] flushed all entries");
     endmethod
 
     method Action wakeup(PhysRegTag tag);
@@ -90,11 +90,11 @@ package ReservationStation;
         if (valid[i][1]) begin
           if (payload[i].src1 == tag && !s1Ready[i][1]) begin
             s1Ready[i][1] <= True;           // port 1
-            $display("[RS] wakeup: slot %0d src1 now ready (p%0d)", i, tag);
+            if (traceOn) $display("[RS] wakeup: slot %0d src1 now ready (p%0d)", i, tag);
           end
           if (payload[i].src2 == tag && !s2Ready[i][1]) begin
             s2Ready[i][1] <= True;           // port 1
-            $display("[RS] wakeup: slot %0d src2 now ready (p%0d)", i, tag);
+            if (traceOn) $display("[RS] wakeup: slot %0d src2 now ready (p%0d)", i, tag);
           end
         end
       end

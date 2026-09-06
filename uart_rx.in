@@ -1,0 +1,7 @@
+mkdir test
+ls
+echo hello > test/file
+cat test/file
+rm test/file
+ls test
+echo DONE_FS

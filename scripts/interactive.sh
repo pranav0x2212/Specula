@@ -5,7 +5,7 @@ LC_ALL=C
 export LC_ALL
 
 SIM_BIN="${1:?usage: $0 <path-to-interactive-sim-binary>}"
-FIFO="uart_rx.in"
+LIVE="uart_rx.in"
 BACKUP="uart_rx.in.regression-backup"
 
 if [ ! -x "$SIM_BIN" ]; then
@@ -31,21 +31,22 @@ cleanup() {
   if [ -n "$OLD_STTY" ]; then
     stty "$OLD_STTY" 2>/dev/null
   fi
-  if [ -p "$FIFO" ]; then
-    rm -f "$FIFO"
-  fi
+  rm -f "$LIVE"
   if [ -f "$BACKUP" ]; then
-    mv -f "$BACKUP" "$FIFO"
+    mv -f "$BACKUP" "$LIVE"
   fi
   echo
   echo "[interactive] session ended, terminal restored, uart_rx.in restored."
 }
 trap cleanup EXIT INT TERM HUP
-if [ -e "$FIFO" ] && [ ! -p "$FIFO" ]; then
-  mv -f "$FIFO" "$BACKUP"
+
+if [ -f "$BACKUP" ]; then
+  rm -f "$LIVE"
+elif [ -e "$LIVE" ]; then
+  mv -f "$LIVE" "$BACKUP"
 fi
-[ -p "$FIFO" ] || mkfifo "$FIFO"
-exec 3<>"$FIFO"
+: > "$LIVE"
+exec 3>>"$LIVE"
 
 OLD_STTY=$(stty -g)
 stty raw -echo -icrnl -inlcr -isig

@@ -114,8 +114,9 @@ package SpeculaCore;
       let fs = fetch.at(pc, csr.satpValue, priv);
 
       if (fs.fault) begin
-        $display("[MMU] instruction page fault (speculative, deferred to commit): va=%h priv=%b satp=%h cause=%0d",
-                 pc, priv, csr.satpValue, fs.faultCause);
+        if (!interactiveMode)
+          $display("[MMU] instruction page fault (speculative, deferred to commit): va=%h priv=%b satp=%h cause=%0d",
+                   pc, priv, csr.satpValue, fs.faultCause);
         fetchedQ.enq(tuple4(pc, 32'h00000013, pc + 4, tagged Valid fs.faultCause));
         ifFaultInFlight <= True;
         pc <= fs.npc;
@@ -512,8 +513,9 @@ package SpeculaCore;
                        && !rs.notEmpty && !alu.notEmpty && !memQ.notEmpty
                        && lsu.sqEmpty && !memResultQ.notEmpty);
       let tvec <- csr.takeTrap(1'b1, 6'd9, pc, 32'd0, priv);
-      $display("[Specula] supervisor external interrupt taken: epc=%h priv=%b -> S, stvec=%h",
-               pc, priv, tvec);
+      if (!interactiveMode)
+        $display("[Specula] supervisor external interrupt taken: epc=%h priv=%b -> S, stvec=%h",
+                 pc, priv, tvec);
       priv <= 2'b01;
       pc   <= tvec;
     endrule
@@ -602,7 +604,7 @@ package SpeculaCore;
                                      data: 0, rdData: 0, addr: vaddr, robTag: e.robTag,
                                      faulted: True, faultCause: tr.cause });
 
-        if (!xlateFault && isMisalignedAccess(e.funct3, addr))
+        if (!interactiveMode && !xlateFault && isMisalignedAccess(e.funct3, addr))
           $display("[LSU] MISALIGNED %s addr=%h funct3=%b - unsupported (M5), operating on the containing word only",
                    e.isLoad ? "load" : "store", addr, e.funct3);
 

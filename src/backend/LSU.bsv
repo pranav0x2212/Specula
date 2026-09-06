@@ -77,8 +77,9 @@ package LSU;
 
     method ActionValue#(Data) load(Addr addr);
       Data v = mem.readWord(addr);
-      if (!mem.inRange(addr))
-        $display("[LSU] Load addr=%h OUT OF RANGE (returns 0)", addr);
+      if (!mem.inRange(addr)) begin
+        if (!interactiveMode) $display("[LSU] Load addr=%h OUT OF RANGE (returns 0)", addr);
+      end
       else if (traceOn)
         $display("[LSU] Load addr=%h -> word %h", addr, v);
       return v;
@@ -114,8 +115,9 @@ package LSU;
       if (mem.inRange(addr)) begin
         mem.writeWord(addr, pos, be);
         if (traceOn) $display("[LSU] Committed store addr=%h be=%b <- raw=%h (positioned=%h)", addr, be, rawData, pos);
-      end else
-        $display("[LSU] Committed store addr=%h OUT OF RANGE (dropped)", addr);
+      end else begin
+        if (!interactiveMode) $display("[LSU] Committed store addr=%h OUT OF RANGE (dropped)", addr);
+      end
     endmethod
 
     method Action sqPop();

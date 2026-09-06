@@ -31,7 +31,8 @@ package Uart;
       action
 `ifdef INTERACTIVE_UART
         $write("%c", c);
-        if (c == 8'h0a) nls <= nls + 1;
+        $fflush;
+        if (c == 8'h0a) nls <= (nls == 4) ? 4 : (nls + 1);
 `else
         if (c == 8'h0a) begin
           $write("[UART] ");
@@ -41,7 +42,7 @@ package Uart;
           end
           $write("\n");
           lcol <= 0;
-          nls  <= nls + 1;
+          nls <= (nls == 4) ? 4 : (nls + 1);
         end else if (lcol < 127) begin
           lbuf[lcol] <= c;
           lcol <= lcol + 1;
@@ -61,11 +62,25 @@ package Uart;
       rxHead <= rxq.first;
     endrule
 
+`ifdef INTERACTIVE_UART
+    Reg#(Bit#(12)) pollDiv <- mkReg(0);
+    rule feedIn (opened && rxq.notFull && nls >= 4 && inf != InvalidFile);
+      pollDiv <= pollDiv + 1;
+      int c <- $fgetc(inf);
+      if (c >= 0)
+        rxq.enq(truncate(pack(c)));
+      else if (pollDiv == 0) begin
+        let clearedEof <- $ungetc(0, inf);
+        int throwaway  <- $fgetc(inf);
+      end
+    endrule
+`else
     rule feedIn (opened && rxq.notFull && nls >= 4 && inf != InvalidFile);
       int c <- $fgetc(inf);
       if (c >= 0)
         rxq.enq(truncate(pack(c)));
     endrule
+`endif
 
     rule rxConsume (isValid(rxObs));
       if (rxq.notEmpty && rxq.first == validValue(rxObs))

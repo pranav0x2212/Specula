@@ -1,6 +1,11 @@
 package Common;
 
   Bool traceOn = False;
+`ifdef INTERACTIVE_UART
+  Bool interactiveMode = True;
+`else
+  Bool interactiveMode = False;
+`endif
 
   typedef Bit#(5) RegIndex;
   typedef Bit#(32) Instruction;

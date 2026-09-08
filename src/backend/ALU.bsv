@@ -42,6 +42,8 @@ package ALU;
     method Bool busy();      
   endinterface
 
+  typedef enum { DIV_IDLE, DIV_RUN, DIV_DONE } DivState deriving (Bits, Eq, FShow);
+
   module mkALU(ALU_IFC);
 
     FIFOF#(ALUReq) reqQ <- mkFIFOF();  // Input buffer
@@ -49,15 +51,76 @@ package ALU;
 
     Array#(Reg#(Bool)) flushReq <- mkCReg(2, False);
 
+    Reg#(DivState)  divSt     <- mkReg(DIV_IDLE);
+    Reg#(Bit#(6))   divCount  <- mkReg(0);
+    Reg#(Bit#(32))  divRem    <- mkReg(0);
+    Reg#(Bit#(32))  divQuot   <- mkReg(0);
+    Reg#(Bit#(32))  divDsor   <- mkReg(0);
+    Reg#(Bit#(32))  divDvnd   <- mkReg(0);
+    Reg#(Bool)      divIsRem  <- mkReg(False);
+    Reg#(Bool)      divByZero <- mkReg(False);
+    Reg#(ALUReq)    divReq    <- mkRegU;
+
+    function Bool isDivOp(ALUOp op) = (op == ALU_DIVU) || (op == ALU_REMU);
+
     rule finishFlush (flushReq[0]);
       reqQ.clear;
       respQ.clear;
       flushReq[0] <= False;
+      divSt <= DIV_IDLE;
       if (traceOn) $display("[ALU] flushed in-flight requests/results");
     endrule
 
-    rule execute (!flushReq[0]);
-      let r = reqQ.first; reqQ.deq;
+    rule divStep (!flushReq[0] && divSt == DIV_RUN);
+      Bit#(33) shifted = { divRem, divQuot[31] };
+      Bit#(33) diff    = shifted - { 1'b0, divDsor };
+      Bool     fits    = (diff[32] == 1'b0);
+      divRem   <= fits ? diff[31:0] : shifted[31:0];
+      divQuot  <= { divQuot[30:0], pack(fits) };
+      divCount <= divCount - 1;
+      if (divCount == 1) divSt <= DIV_DONE;
+    endrule
+
+    rule divDrain (!flushReq[0] && divSt == DIV_DONE);
+      Bit#(32) q   = divByZero ? 32'hFFFFFFFF : divQuot;
+      Bit#(32) rem = divByZero ? divDvnd      : divRem;
+      Bit#(32) res = divIsRem  ? rem : q;
+      respQ.enq(ALUResp {
+        result: res,
+        dest: divReq.dest,
+        robTag: divReq.robTag,
+        isBranch: False,
+        isJump: False,
+        isJalr: False,
+        actualTaken: False,
+        actualTarget: 32'd0,
+        pc: divReq.pc,
+        fallPC: divReq.fallPC
+      });
+      divSt <= DIV_IDLE;
+      if (traceOn) $display("[ALU] divider retire: rob=%0d %s -> %h",
+               divReq.robTag.idx, divIsRem ? "REMU" : "DIVU", res);
+    endrule
+
+    rule execute (!flushReq[0] && divSt == DIV_IDLE);
+      let r = reqQ.first;
+
+      if (isDivOp(r.opcode)) begin
+        reqQ.deq;
+        divReq    <= r;
+        divRem    <= 32'd0;
+        divQuot   <= r.a;
+        divDsor   <= r.b;
+        divDvnd   <= r.a;
+        divIsRem  <= (r.opcode == ALU_REMU);
+        divByZero <= (r.b == 32'd0);
+        divCount  <= 6'd32;
+        divSt     <= DIV_RUN;
+        if (traceOn) $display("[ALU] divider start: rob=%0d %s a=%h b=%h",
+                 r.robTag.idx, (r.opcode == ALU_REMU) ? "REMU" : "DIVU", r.a, r.b);
+      end
+      else begin
+      reqQ.deq;
 
       Data res = 32'd0;
       Bool isBranch = False;
@@ -81,8 +144,6 @@ package ALU;
         ALU_AUIPC: res = r.pc + r.branchOffset;
         ALU_NOP: res = 32'd0;
         ALU_MUL:  res = r.a * r.b;
-        ALU_DIVU: res = (r.b == 0) ? 32'hFFFFFFFF : (r.a / r.b);
-        ALU_REMU: res = (r.b == 0) ? r.a : (r.a % r.b);
         ALU_JAL: begin
           isBranch = True; isJump = True; actualTaken = True;
           actualTarget = r.pc + r.branchOffset;
@@ -145,6 +206,7 @@ package ALU;
         fallPC: r.fallPC
       };
       respQ.enq(out);
+      end
     endrule
 
     method Bool notFull() = reqQ.notFull;
@@ -164,7 +226,7 @@ package ALU;
     endmethod
 
     method Bool busy();
-      return flushReq[0] || reqQ.notEmpty || respQ.notEmpty;
+      return flushReq[0] || reqQ.notEmpty || respQ.notEmpty || divSt != DIV_IDLE;
     endmethod
 
   endmodule

@@ -15,6 +15,7 @@ package MemQueue;
     PhysRegTag dest;
     Bit#(3)    funct3;
     ROBTag     robTag;
+    SQPtr      sqWm;
   } MemQEntry deriving (Bits, FShow);
 
   interface MemQueue_IFC;

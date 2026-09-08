@@ -46,6 +46,12 @@ package SpeculaCore;
     ROBTag     robTag;
   } SysMeta deriving (Bits, FShow);
 
+  typedef Tuple2#(UInt#(7), Maybe#(MemQIdx)) AgePick;
+
+  function AgePick olderPick(AgePick a, AgePick b);
+    return (tpl_1(a) <= tpl_1(b)) ? a : b;
+  endfunction
+
   module mkSpeculaCore(Empty);
     Memory_IFC mem <- mkSystemBus;
 
@@ -316,8 +322,10 @@ package SpeculaCore;
           PhysRegTag basePhys = rename.lookupMapping(r.instr.rs1);
           PhysRegTag dataPhys = rename.lookupMapping(r.instr.rs2);
 
+          SQPtr sqWm0 = lsu.sqTailMark();
+
           if (!isLoad)
-            lsu.sqAllocate(robTag);
+            lsu.sqAllocate();
 
           memQ.enq(MemQEntry {
             isLoad: isLoad,
@@ -327,7 +335,8 @@ package SpeculaCore;
             imm:    r.instr.imm,
             dest:   destTag,
             funct3: r.instr.funct3,
-            robTag: robTag
+            robTag: robTag,
+            sqWm:   sqWm0
           });
           if (traceOn) $display("[DISPATCH] %s rob=%0d -> MemQueue (base=x%0d data=x%0d imm=%0d)",
                    isAmo ? "AMOSWAP" : (isLoad ? "LOAD" : "STORE"), robTag.idx, r.instr.rs1, r.instr.rs2, r.instr.imm);
@@ -546,7 +555,6 @@ package SpeculaCore;
     endrule
 
     function Vector#(MEMQ_SIZE, Bool) memIssuableMask();
-      ROBTag hTag = rob.headTag;
       Vector#(MEMQ_SIZE, Bool)      vmask   = memQ.validMask;
       Vector#(MEMQ_SIZE, MemQEntry) entries = memQ.peekAll;
       Vector#(MEMQ_SIZE, Bool) m = newVector;
@@ -556,7 +564,7 @@ package SpeculaCore;
           let e = entries[i];
           Bool baseRdy = prf.isReady(e.base);
           Bool dataRdy = e.isLoad || prf.isReady(e.sdata);
-          Bool ordOK   = (!e.isLoad && !e.isAmo) || !lsu.sqOlderStorePending(e.robTag, hTag);
+          Bool ordOK   = (!e.isLoad && !e.isAmo) || !lsu.sqOlderStorePending(e.sqWm);
           ok = baseRdy && dataRdy && ordOK;
         end
         m[i] = ok;
@@ -576,18 +584,22 @@ package SpeculaCore;
       Vector#(MEMQ_SIZE, MemQEntry) entries = memQ.peekAll;
       Vector#(MEMQ_SIZE, Bool)      issuable = memIssuableMask();
 
-      Maybe#(MemQIdx) pick = tagged Invalid;
-      UInt#(7) bestAge = 7'd127;
-      for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1) begin
-        if (issuable[i]) begin
-          let e = entries[i];
-          UInt#(7) age = extend(e.robTag.idx - hTag.idx);
-          if (age < bestAge) begin
-            bestAge = age;
-            pick = tagged Valid fromInteger(i);
-          end
-        end
-      end
+      Vector#(MEMQ_SIZE, AgePick) cand = newVector;
+      for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1)
+        cand[i] = tuple2(issuable[i] ? extend(entries[i].robTag.idx - hTag.idx)
+                                     : 7'd127,
+                         issuable[i] ? tagged Valid fromInteger(i)
+                                     : tagged Invalid);
+
+      Vector#(4, AgePick) lvl1 = newVector;
+      for (Integer i = 0; i < 4; i = i + 1)
+        lvl1[i] = olderPick(cand[2*i], cand[2*i + 1]);
+      Vector#(2, AgePick) lvl2 = newVector;
+      for (Integer i = 0; i < 2; i = i + 1)
+        lvl2[i] = olderPick(lvl1[2*i], lvl1[2*i + 1]);
+      AgePick bestPick = olderPick(lvl2[0], lvl2[1]);
+
+      Maybe#(MemQIdx) pick = tpl_2(bestPick);
 
       if (pick matches tagged Valid .idx) begin
         let e = entries[idx];
@@ -609,7 +621,7 @@ package SpeculaCore;
                    e.isLoad ? "load" : "store", addr, e.funct3);
 
         if (!xlateFault && e.isAmo) begin
-          match {.covered, .fwdWord} = lsu.sqForward(addr, e.robTag, hTag);
+          match {.covered, .fwdWord} = lsu.sqForward(addr, e.sqWm);
           Data full = fwdWord;
           if (covered != 4'b1111) begin
             let mw <- lsu.load(addr);
@@ -620,11 +632,11 @@ package SpeculaCore;
               end
           end
           Data rs2v = fromMaybe(0, prf.read(e.sdata));
-          lsu.sqExecStore(e.robTag, addr, rs2v, e.funct3);
+          lsu.sqExecStore(e.sqWm, addr, rs2v, e.funct3);
           memResultQ.enq(MemResult { isLoad: False, isAmo: True, dest: e.dest, data: rs2v, rdData: full, addr: addr, robTag: e.robTag, faulted: False, faultCause: 0 });
           if (traceOn) $display("[MEMQ] amoswap rob=%0d issued: addr=%h old=%h new=%h", e.robTag.idx, addr, full, rs2v);
         end else if (!xlateFault && e.isLoad) begin
-          match {.covered, .fwdWord} = lsu.sqForward(addr, e.robTag, hTag);
+          match {.covered, .fwdWord} = lsu.sqForward(addr, e.sqWm);
           Data full = fwdWord;
           if (covered != 4'b1111) begin
             let mw <- lsu.load(addr);
@@ -642,7 +654,7 @@ package SpeculaCore;
           if (traceOn) $display("[MEMQ] load rob=%0d issued: addr=%h funct3=%b result=%h", e.robTag.idx, addr, e.funct3, result);
         end else if (!xlateFault) begin
           Data sdata = fromMaybe(0, prf.read(e.sdata));
-          lsu.sqExecStore(e.robTag, addr, sdata, e.funct3);
+          lsu.sqExecStore(e.sqWm, addr, sdata, e.funct3);
           memResultQ.enq(MemResult { isLoad: False, isAmo: False, dest: 0, data: sdata, rdData: 0, addr: addr, robTag: e.robTag, faulted: False, faultCause: 0 });
           if (traceOn) $display("[MEMQ] store rob=%0d issued: addr=%h funct3=%b raw-data=%h", e.robTag.idx, addr, e.funct3, sdata);
         end

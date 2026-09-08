@@ -7,7 +7,7 @@ import SpecialFIFOs::*;
 import Common::*;
 import RenameStage::*;
 
-typedef 64 NumEntries;
+typedef 32 NumEntries;
 
 typedef struct {
   ROBTag tag;
@@ -44,13 +44,16 @@ module mkROB(ROB_IFC);
 
   Vector#(NumEntries, Reg#(ROBEntry)) robEntries <- replicateM(mkRegU);
   Vector#(NumEntries, Reg#(Bool)) completionFlags <- replicateM(mkReg(False));
-  Reg#(UInt#(6)) head <- mkReg(0);
-  Reg#(UInt#(6)) tail <- mkReg(0);
-  Reg#(UInt#(7)) count <- mkReg(0); 
 
-  function ROBTag mkTag(UInt#(6) idx);
-    return ROBTag { idx: idx };
+  Reg#(UInt#(TLog#(NumEntries))) head <- mkReg(0);
+  Reg#(UInt#(TLog#(NumEntries))) tail <- mkReg(0);
+  Reg#(UInt#(TAdd#(TLog#(NumEntries), 1))) count <- mkReg(0);
+
+  function ROBTag mkTag(UInt#(TLog#(NumEntries)) idx);
+    return ROBTag { idx: zeroExtend(idx) };
   endfunction
+
+  function UInt#(TLog#(NumEntries)) slotOf(ROBTag t) = truncate(t.idx);
 
   method Bool canAllocate();
     return (count < fromInteger(valueOf(NumEntries)));
@@ -88,28 +91,28 @@ module mkROB(ROB_IFC);
   endmethod
 
   method Action writeResult(ROBTag tag, Data data);
-    robEntries[tag.idx].data <= data;
+    robEntries[slotOf(tag)].data <= data;
   endmethod
 
   method Action markCompleted(ROBTag tag);
-    completionFlags[tag.idx] <= True;
+    completionFlags[slotOf(tag)] <= True;
   endmethod
 
   method Action writeResultAndMark(ROBTag tag, Data data);
-    robEntries[tag.idx].data <= data;
-    completionFlags[tag.idx] <= True;
+    robEntries[slotOf(tag)].data <= data;
+    completionFlags[slotOf(tag)] <= True;
   endmethod
 
   method Action completeEntry(ROBTag tag, Data data, Addr memAddr, Bool mispredicted, Addr redirectPC, Bool faulted, Bit#(4) faultCause);
-    let e = robEntries[tag.idx];
+    let e = robEntries[slotOf(tag)];
     e.data         = data;
     e.memAddr      = memAddr;
     e.mispredicted = mispredicted;
     e.redirectPC   = redirectPC;
     e.faulted      = faulted;
     e.faultCause   = faultCause;
-    robEntries[tag.idx] <= e;
-    completionFlags[tag.idx] <= True;
+    robEntries[slotOf(tag)] <= e;
+    completionFlags[slotOf(tag)] <= True;
   endmethod
 
   method Maybe#(Tuple2#(ROBTag, ROBEntry)) peekHead();

@@ -330,6 +330,8 @@ package Common;
     return da < db;
   endfunction
 
+  typedef Bit#(4) SQPtr;
+
   typedef struct {
     ALUOp opcode;
     PhysRegTag src1;

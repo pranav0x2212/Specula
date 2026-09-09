@@ -46,12 +46,6 @@ package SpeculaCore;
     ROBTag     robTag;
   } SysMeta deriving (Bits, FShow);
 
-  typedef Tuple2#(UInt#(7), Maybe#(MemQIdx)) AgePick;
-
-  function AgePick olderPick(AgePick a, AgePick b);
-    return (tpl_1(a) <= tpl_1(b)) ? a : b;
-  endfunction
-
   module mkSpeculaCore(Empty);
     Memory_IFC mem <- mkSystemBus;
 
@@ -82,6 +76,10 @@ package SpeculaCore;
     endrule
 
     FIFOF#(MemResult) memResultQ <- mkSizedFIFOF(4);
+
+    Reg#(MemQEntry)    selEntry <- mkRegU;
+    Array#(Reg#(Bool)) selValid <- mkCReg(3, False);
+
     Addr      tohostAddr = 32'h00100000;
     Bit#(32)  maxPC      = fromInteger(memBaseAddr + valueOf(MemWords) * 4);
 
@@ -195,6 +193,7 @@ package SpeculaCore;
       memQ.flush;
       lsu.sqFlush;
       memResultQ.clear;
+      selValid[2] <= False;
       fetchedQ.clear;
       decodedQ.clear;
       renamedInstrQ.clear;
@@ -579,30 +578,38 @@ package SpeculaCore;
       return any;
     endfunction
 
-    rule doMemIssue (!flushPending && !mmuFault && memResultQ.notFull && memIssuableExists);
+    rule doMemSelect (!flushPending && !mmuFault && !selValid[1] && memIssuableExists);
       ROBTag hTag = rob.headTag;
       Vector#(MEMQ_SIZE, MemQEntry) entries = memQ.peekAll;
       Vector#(MEMQ_SIZE, Bool)      issuable = memIssuableMask();
 
-      Vector#(MEMQ_SIZE, AgePick) cand = newVector;
+      Vector#(MEMQ_SIZE, Bit#(5)) age = newVector;
       for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1)
-        cand[i] = tuple2(issuable[i] ? extend(entries[i].robTag.idx - hTag.idx)
-                                     : 7'd127,
-                         issuable[i] ? tagged Valid fromInteger(i)
-                                     : tagged Invalid);
+        age[i] = pack(entries[i].robTag.idx - hTag.idx);
 
-      Vector#(4, AgePick) lvl1 = newVector;
-      for (Integer i = 0; i < 4; i = i + 1)
-        lvl1[i] = olderPick(cand[2*i], cand[2*i + 1]);
-      Vector#(2, AgePick) lvl2 = newVector;
-      for (Integer i = 0; i < 2; i = i + 1)
-        lvl2[i] = olderPick(lvl1[2*i], lvl1[2*i + 1]);
-      AgePick bestPick = olderPick(lvl2[0], lvl2[1]);
+      Vector#(MEMQ_SIZE, Bool) oldest = newVector;
+      for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1) begin
+        Bool win = issuable[i];
+        for (Integer j = 0; j < valueOf(MEMQ_SIZE); j = j + 1)
+          if (i != j) win = win && (!issuable[j] || (age[i] < age[j]));
+        oldest[i] = win;
+      end
 
-      Maybe#(MemQIdx) pick = tpl_2(bestPick);
+      Bool haveOldest = False;
+      MemQIdx idx = 0;
+      for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1)
+        if (oldest[i]) begin haveOldest = True; idx = fromInteger(i); end
 
-      if (pick matches tagged Valid .idx) begin
-        let e = entries[idx];
+      if (haveOldest) begin
+        selEntry    <= entries[idx];
+        selValid[1] <= True;
+        memQ.issueOH(oldest);
+      end
+    endrule
+
+    rule doMemIssue (!flushPending && !mmuFault && memResultQ.notFull && selValid[0]);
+        let e = selEntry;
+        selValid[0] <= False;
         Data baseVal = fromMaybe(0, prf.read(e.base));
         Addr vaddr = baseVal + e.imm;
 
@@ -658,8 +665,6 @@ package SpeculaCore;
           memResultQ.enq(MemResult { isLoad: False, isAmo: False, dest: 0, data: sdata, rdData: 0, addr: addr, robTag: e.robTag, faulted: False, faultCause: 0 });
           if (traceOn) $display("[MEMQ] store rob=%0d issued: addr=%h funct3=%b raw-data=%h", e.robTag.idx, addr, e.funct3, sdata);
         end
-        memQ.issue(idx);
-      end
     endrule
 
     rule doWriteback (alu.notEmpty);
@@ -732,25 +737,23 @@ package SpeculaCore;
     (* descending_urgency = "doWriteback,    doTakeExtInt" *)
     (* descending_urgency = "doMemWriteback, doTakeExtInt" *)
     (* descending_urgency = "doTakeExtInt,   doFetch"      *)
+    (* descending_urgency = "doWriteback,    doFetch"      *)
     rule doMemWriteback (memResultQ.notEmpty);
       let mr = memResultQ.first; memResultQ.deq;
       rob.completeEntry(mr.robTag, mr.data, mr.addr, False, 0, mr.faulted, mr.faultCause);
-      if (mr.isAmo) begin
+      Bool hasRd = mr.isAmo || mr.isLoad;
+      Data rdVal = mr.isAmo ? mr.rdData : mr.data;
+      if (hasRd) begin
         if (mr.dest != 0) begin
-          prf.write(mr.dest, mr.rdData);
+          prf.write(mr.dest, rdVal);
           prf.markReady(mr.dest);
         end
         rs.wakeup(mr.dest);
-        if (traceOn) $display("[Writeback] amoswap rob=%0d : rd p%0d <- %h (mem <- %h)", mr.robTag.idx, mr.dest, mr.rdData, mr.data);
-      end else if (mr.isLoad) begin
-        if (mr.dest != 0) begin
-          prf.write(mr.dest, mr.data);
-          prf.markReady(mr.dest);
-        end
-        rs.wakeup(mr.dest);
-        if (traceOn) $display("[Writeback] load rob=%0d result -> p%0d = %h", mr.robTag.idx, mr.dest, mr.data);
-      end else begin
-        if (traceOn) $display("[Writeback] store rob=%0d marked complete", mr.robTag.idx);
+      end
+      if (traceOn) begin
+        if (mr.isAmo)       $display("[Writeback] amoswap rob=%0d : rd p%0d <- %h (mem <- %h)", mr.robTag.idx, mr.dest, mr.rdData, mr.data);
+        else if (mr.isLoad) $display("[Writeback] load rob=%0d result -> p%0d = %h", mr.robTag.idx, mr.dest, mr.data);
+        else                $display("[Writeback] store rob=%0d marked complete", mr.robTag.idx);
       end
     endrule
 

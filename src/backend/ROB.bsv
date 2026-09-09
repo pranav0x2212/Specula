@@ -50,10 +50,10 @@ module mkROB(ROB_IFC);
   Reg#(UInt#(TAdd#(TLog#(NumEntries), 1))) count <- mkReg(0);
 
   function ROBTag mkTag(UInt#(TLog#(NumEntries)) idx);
-    return ROBTag { idx: zeroExtend(idx) };
+    return ROBTag { idx: idx };
   endfunction
 
-  function UInt#(TLog#(NumEntries)) slotOf(ROBTag t) = truncate(t.idx);
+  function UInt#(TLog#(NumEntries)) slotOf(ROBTag t) = t.idx;
 
   method Bool canAllocate();
     return (count < fromInteger(valueOf(NumEntries)));

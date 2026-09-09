@@ -24,7 +24,7 @@ package MemQueue;
     method Bool notEmpty;
     method Vector#(MEMQ_SIZE, Bool) validMask;
     method Vector#(MEMQ_SIZE, MemQEntry) peekAll;
-    method Action issue(MemQIdx i);
+    method Action issueOH(Vector#(MEMQ_SIZE, Bool) oh);
     method Action flush();
   endinterface
 
@@ -73,9 +73,12 @@ package MemQueue;
       return v;
     endmethod
 
-    method Action issue(MemQIdx i);
-      valid[i][0] <= False;
-      if (traceOn) $display("[MEMQ] issue slot %0d (rob=%0d)", i, payload[i].robTag.idx);
+    method Action issueOH(Vector#(MEMQ_SIZE, Bool) oh);
+      for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1)
+        if (oh[i]) begin
+          valid[i][0] <= False;
+          if (traceOn) $display("[MEMQ] issue slot %0d (rob=%0d)", i, payload[i].robTag.idx);
+        end
     endmethod
 
     method Action flush();

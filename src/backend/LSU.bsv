@@ -79,6 +79,8 @@ package LSU;
     Reg#(SQPtr) sqHead <- mkReg(0);
     Reg#(SQPtr) sqTail <- mkReg(0);
 
+    Array#(Reg#(Bit#(SQ_SIZE))) sqExecd <- mkCReg(3, 0);
+
     function Bit#(3) slotOf(SQPtr p) = truncate(p);
 
     method ActionValue#(Data) load(Addr addr);
@@ -94,6 +96,7 @@ package LSU;
     method Action sqAllocate();
       sq[slotOf(sqTail)] <= SQEntry { addrReady: False, addr: 0, dataReady: False, data: 0, be: 0 };
       sqValid[slotOf(sqTail)] <= True;
+      sqExecd[2] <= sqExecd[2] & ~(8'b1 << slotOf(sqTail));
       sqTail <= sqTail + 1;
       if (traceOn) $display("[SQ] alloc in slot %0d", slotOf(sqTail));
     endmethod
@@ -110,6 +113,7 @@ package LSU;
         e.addr = addr; e.data = pos; e.be = be;
         e.addrReady = True; e.dataReady = True;
         sq[s] <= e;
+        sqExecd[0] <= sqExecd[0] | (8'b1 << s);
         if (traceOn) $display("[SQ] exec slot %0d addr=%h be=%b pos-data=%h", s, addr, be, pos);
       end
     endmethod
@@ -138,7 +142,7 @@ package LSU;
       for (Integer i = 0; i < valueOf(SQ_SIZE); i = i + 1) begin
         Bit#(3) ii  = fromInteger(i);
         SQPtr   age = zeroExtend(ii - h3);
-        if (sqValid[i] && (age < olderLive) && !sq[i].addrReady)
+        if (sqValid[i] && (age < olderLive) && (sqExecd[1][ii] == 1'b0))
           pend = True;
       end
       return pend;
@@ -186,6 +190,7 @@ package LSU;
     method Action sqFlush();
       for (Integer i = 0; i < valueOf(SQ_SIZE); i = i + 1)
         sqValid[i] <= False;
+      sqExecd[2] <= 0;
       sqHead <= 0;
       sqTail <= 0;
       if (traceOn) $display("[SQ] flushed");

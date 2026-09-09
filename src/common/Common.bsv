@@ -321,14 +321,8 @@ package Common;
   endfunction
 
   typedef struct {
-    UInt#(6) idx;
+    UInt#(5) idx;
   } ROBTag deriving (Bits, FShow);
-
-  function Bool isOlderRob(ROBTag a, ROBTag b, ROBTag head);
-    UInt#(6) da = a.idx - head.idx;
-    UInt#(6) db = b.idx - head.idx;
-    return da < db;
-  endfunction
 
   typedef Bit#(4) SQPtr;
 

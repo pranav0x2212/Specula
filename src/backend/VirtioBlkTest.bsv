@@ -22,6 +22,7 @@ package VirtioBlkTest;
     function Bit#(13) ix(Addr a) = truncate((a - rbase) >> 2);
     function Bool rng(Addr a) = (a >= rbase) && (a < rbase + 32768);
     method Bit#(32) readWord(Addr a) = rng(a) ? m.sub(ix(a)) : 32'h0;
+    method Bit#(32) fetchWord(Addr a) = rng(a) ? m.sub(ix(a)) : 32'h0;
     method Action writeWord(Addr a, Bit#(32) d, Bit#(4) be);
       if (rng(a)) begin
         let o = m.sub(ix(a));
@@ -31,6 +32,7 @@ package VirtioBlkTest;
     endmethod
     method Bool inRange(Addr a) = rng(a);
     method Bit#(32) physReadWord(Addr a) = rng(a) ? m.sub(ix(a)) : 32'h0;
+    method Bit#(32) physReadRoot(Addr a) = m.sub(ix(a));
     method Bool extIntReq() = False;
   endmodule
 

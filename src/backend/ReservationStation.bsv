@@ -21,6 +21,17 @@ package ReservationStation;
     Vector#(RS_SIZE, Array#(Reg#(Bool)))  s1Ready <- replicateM(mkCReg(3, False));
     Vector#(RS_SIZE, Array#(Reg#(Bool)))  s2Ready <- replicateM(mkCReg(3, False));
 
+    PulseWire deqFired    <- mkPulseWire;
+    Wire#(Bool) anyFreeNow <- mkBypassWire;
+
+    (* fire_when_enabled, no_implicit_conditions *)
+    rule calcAnyFree;
+      Bool a = False;
+      for (Integer i = 0; i < valueOf(RS_SIZE); i = i + 1)
+        a = a || !valid[i][0];
+      anyFreeNow <= a;
+    endrule
+
     function Maybe#(RSIdx) firstFree();
       Maybe#(RSIdx) r = tagged Invalid;
       for (Integer i = valueOf(RS_SIZE) - 1; i >= 0; i = i - 1)
@@ -65,6 +76,7 @@ package ReservationStation;
       let r = firstReady();
       if (r matches tagged Valid .idx) begin
         valid[idx][0] <= False;              // port 0
+        deqFired.send;
         RSEntry e = payload[idx];
         e.src1Ready = True;
         e.src2Ready = True;
@@ -76,7 +88,7 @@ package ReservationStation;
       end
     endmethod
 
-    method Bool notFull  = isValid(firstFree());
+    method Bool notFull  = anyFreeNow || deqFired;
     method Bool notEmpty = isValid(firstReady());
 
     method Action flush();

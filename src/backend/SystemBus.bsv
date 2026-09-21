@@ -32,6 +32,8 @@ package SystemBus;
                            ram.readWord(a);
     endmethod
 
+    method Bit#(32) fetchWord(Addr a) = ram.fetchWord(a);
+
     method Action writeWord(Addr a, Bit#(32) d, Bit#(4) be);
       if      (isUart(a))   uart.writeWord(a, d, be);
       else if (isVirtio(a)) virtio.writeWord(a, d, be);
@@ -41,6 +43,7 @@ package SystemBus;
 
     method Bool inRange(Addr a) = isUart(a) || isVirtio(a) || isPlic(a) || ram.inRange(a);
     method Bit#(32) physReadWord(Addr a) = ram.physReadWord(a);
+    method Bit#(32) physReadRoot(Addr a) = ram.physReadRoot(a);
     method Bool extIntReq() = plic.extReq();
     method Action uartRxObserved(Bit#(8) b) = uart.rxObserved(b);
   endmodule

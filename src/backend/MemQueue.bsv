@@ -31,11 +31,20 @@ package MemQueue;
   module mkMemQueue(MemQueue_IFC);
     Vector#(MEMQ_SIZE, Reg#(MemQEntry))    payload <- replicateM(mkRegU);
     Vector#(MEMQ_SIZE, Array#(Reg#(Bool))) valid   <- replicateM(mkCReg(3, False));
+    Reg#(Bit#(MEMQ_SIZE)) validSnap <- mkReg(0);
+
+    (* fire_when_enabled, no_implicit_conditions *)
+    rule snapshot;
+      Bit#(MEMQ_SIZE) s = 0;
+      for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1)
+        s[i] = pack(valid[i][2]);
+      validSnap <= s;
+    endrule
 
     function Maybe#(MemQIdx) firstFree();
       Maybe#(MemQIdx) r = tagged Invalid;
       for (Integer i = valueOf(MEMQ_SIZE) - 1; i >= 0; i = i - 1)
-        if (!valid[i][1]) r = tagged Valid fromInteger(i);
+        if (validSnap[i] == 1'b0) r = tagged Valid fromInteger(i);
       return r;
     endfunction
 

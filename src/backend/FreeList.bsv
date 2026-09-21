@@ -23,19 +23,37 @@ package FreeList;
 
 
     method ActionValue#(Maybe#(PhysRegTag)) tryAllocate();
-      Maybe#(PhysRegTag) result = tagged Invalid;
-      Bool allocated = False;
-
-      action
-        for (Integer i = 0; i < valueOf(NUM_PHYS_REGS); i = i + 1) begin
-          if (!allocated && freelist[i]) begin
-            freelist[i] <= False;
-            result = tagged Valid fromInteger(i);
-            allocated = True;
-          end
+      Vector#(8, Bool)     grpAny = newVector;
+      Vector#(8, Bit#(3))  grpIdx = newVector;
+      Vector#(64, Bool)    inPick = newVector;
+      for (Integer g = 0; g < 8; g = g + 1) begin
+        Bool below = False;
+        Bit#(3) idx = 0;
+        for (Integer j = 0; j < 8; j = j + 1) begin
+          Bool pk = freelist[g * 8 + j] && !below;
+          inPick[g * 8 + j] = pk;
+          if (pk) idx = idx | fromInteger(j);
+          below = below || freelist[g * 8 + j];
         end
-      endaction
-      return result;
+        grpAny[g] = below;
+        grpIdx[g] = idx;
+      end
+
+      Bool gBelow = False;
+      Bit#(3) hi = 0;
+      Bit#(3) lo = 0;
+      for (Integer g = 0; g < 8; g = g + 1) begin
+        Bool gs = grpAny[g] && !gBelow;
+        if (gs) begin
+          hi = hi | fromInteger(g);
+          lo = lo | grpIdx[g];
+        end
+        for (Integer j = 0; j < 8; j = j + 1)
+          if (gs && inPick[g * 8 + j]) freelist[g * 8 + j] <= False;
+        gBelow = gBelow || grpAny[g];
+      end
+
+      return gBelow ? tagged Valid ({hi, lo}) : tagged Invalid;
     endmethod
 
     method Action free(PhysRegTag tag);

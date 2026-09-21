@@ -110,4 +110,26 @@ package RVCExpand;
 
   function Bool isCompressedParcel(Bit#(16) parcel) = (parcel[1:0] != 2'b11);
 
+  typedef struct {
+    Bool     jal;
+    Bool     jalr;
+    Bool     cond;
+    Bool     ser;
+    Bit#(32) jalImm;
+  } PreDec deriving (Bits, Eq, FShow);
+
+  function PreDec predecodeCF(Bit#(16) parcel, Bit#(16) hi);
+    Bit#(32) raw = { hi, parcel };
+    Bit#(5)  key = { parcel[1:0], parcel[15:13] };
+    Bool raw11   = (parcel[1:0] == 2'b11);
+    Bool cJal    = (key == 5'b01_001) || (key == 5'b01_101);
+    Bool cCond   = (key == 5'b01_110) || (key == 5'b01_111);
+    Bool cJalr   = (key == 5'b10_100) && (parcel[6:2] == 5'd0) && (parcel[11:7] != 5'd0);
+    return PreDec { jal:    (raw[6:0] == 7'b1101111) || cJal,
+                    jalr:   (raw[6:0] == 7'b1100111) || cJalr,
+                    cond:   (raw[6:0] == 7'b1100011) || cCond,
+                    ser:    isSerializingInstr(raw),
+                    jalImm: raw11 ? jalImmediate(raw) : signExtend21(cjImm(parcel)) };
+  endfunction
+
 endpackage

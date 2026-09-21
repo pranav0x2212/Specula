@@ -55,8 +55,18 @@ package RVCExpandTest;
 
   module mkRVCExpandTest(Empty);
     Reg#(Bool) done <- mkReg(False);
+    Reg#(Bool) vecDone <- mkReg(False);
+    Reg#(Bit#(32)) vecFails <- mkReg(0);
+    Reg#(Bit#(17)) sweepIdx <- mkReg(0);
+    Reg#(Bit#(32)) sweepFails <- mkReg(0);
 
-    rule go (!done);
+    function Bit#(16) hiVal(Integer k) =
+      (case (k)
+        0: 16'h0000;  1: 16'hFFFF;  2: 16'h3020;  3: 16'h1020;
+        4: 16'h5A5A;  5: 16'hA5A5;  6: 16'h8000;  default: 16'h0001;
+      endcase);
+
+    rule go (!vecDone);
       Bit#(32) fails = 0;
       for (Integer i = 0; i < valueOf(NumTests); i = i + 1) begin
         match {.enc, .expd} = testVec(i);
@@ -80,8 +90,36 @@ package RVCExpandTest;
         $display("[RVC-TEST] PASS - all %0d vectors expand + decode correctly", valueOf(NumTests));
       else
         $display("[RVC-TEST] FAIL - %0d/%0d vectors wrong", fails, valueOf(NumTests));
-      done <= True;
-      $finish(0);
+      vecFails <= fails;
+      vecDone <= True;
+    endrule
+
+    rule sweep (vecDone && !done);
+      Bit#(16) p = sweepIdx[15:0];
+      Bit#(32) bad = 0;
+      for (Integer k = 0; k < 8; k = k + 1) begin
+        Bit#(16) hi = hiVal(k);
+        Instruction ins = isCompressedParcel(p) ? expandRVC(p) : { hi, p };
+        PreDec pd = predecodeCF(p, hi);
+        Bool rj  = (ins[6:0] == 7'b1101111);
+        Bool rjr = (ins[6:0] == 7'b1100111);
+        Bool rc  = (ins[6:0] == 7'b1100011);
+        Bool ok  = (pd.jal == rj) && (pd.jalr == rjr) && (pd.cond == rc)
+                   && (pd.ser == isSerializingInstr(ins))
+                   && (!rj || pd.jalImm == jalImmediate(ins));
+        if (!ok) bad = bad + 1;
+      end
+      if (bad != 0) $display("[RVC-TEST] PREDECODE FAIL parcel=%04h (%0d hi variants)", p, bad);
+      sweepFails <= sweepFails + bad;
+      sweepIdx <= sweepIdx + 1;
+      if (sweepIdx == 17'h0FFFF) begin
+        if (sweepFails + bad == 0 && vecFails == 0)
+          $display("[RVC-TEST] PASS - predecode == expandRVC-derived classification for all 65536 parcels x 8 hi");
+        else
+          $display("[RVC-TEST] FAIL - predecode mismatches=%0d", sweepFails + bad);
+        done <= True;
+        $finish(0);
+      end
     endrule
   endmodule
 

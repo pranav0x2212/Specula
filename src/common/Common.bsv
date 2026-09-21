@@ -19,6 +19,11 @@ package Common;
     Bool        isComp;
     Bool        fault;
     Bit#(4)     faultCause;
+    Bool        pdJal;
+    Bool        pdJalr;
+    Bool        pdCond;
+    Bool        pdSer;
+    Bit#(32)    pdJalImm;
   } FetchSlice deriving (Bits, FShow);
 
   typedef enum {

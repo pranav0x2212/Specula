@@ -142,7 +142,7 @@ package LSU;
       for (Integer i = 0; i < valueOf(SQ_SIZE); i = i + 1) begin
         Bit#(3) ii  = fromInteger(i);
         SQPtr   age = zeroExtend(ii - h3);
-        if (sqValid[i] && (age < olderLive) && (sqExecd[1][ii] == 1'b0))
+        if (sqValid[i] && (age < olderLive) && (sqExecd[0][ii] == 1'b0))
           pend = True;
       end
       return pend;

@@ -61,6 +61,10 @@ package ALU;
     Reg#(Bool)      divByZero <- mkReg(False);
     Reg#(ALUReq)    divReq    <- mkRegU;
 
+    Reg#(Bool)      mulPending <- mkReg(False);
+    Reg#(ALUReq)    mulReq     <- mkRegU;
+    Reg#(Data)      mulResult  <- mkRegU;
+
     function Bool isDivOp(ALUOp op) = (op == ALU_DIVU) || (op == ALU_REMU);
 
     rule finishFlush (flushReq[0]);
@@ -68,6 +72,7 @@ package ALU;
       respQ.clear;
       flushReq[0] <= False;
       divSt <= DIV_IDLE;
+      mulPending <= False;
       if (traceOn) $display("[ALU] flushed in-flight requests/results");
     endrule
 
@@ -102,7 +107,26 @@ package ALU;
                divReq.robTag.idx, divIsRem ? "REMU" : "DIVU", res);
     endrule
 
-    rule execute (!flushReq[0] && divSt == DIV_IDLE);
+    rule mulDrain (!flushReq[0] && mulPending);
+      let r = mulReq;
+      ALUResp out = ALUResp {
+        result: mulResult,
+        dest: r.dest,
+        robTag: r.robTag,
+        isBranch: False,
+        isJump: False,
+        isJalr: False,
+        actualTaken: False,
+        actualTarget: 32'd0,
+        pc: r.pc,
+        fallPC: r.fallPC
+      };
+      respQ.enq(out);
+      mulPending <= False;
+      if (traceOn) $display("[ALU] mul drain: rob=%0d res=%h", r.robTag.idx, mulResult);
+    endrule
+
+    rule execute (!flushReq[0] && divSt == DIV_IDLE && !mulPending);
       let r = reqQ.first;
 
       if (isDivOp(r.opcode)) begin
@@ -118,6 +142,13 @@ package ALU;
         divSt     <= DIV_RUN;
         if (traceOn) $display("[ALU] divider start: rob=%0d %s a=%h b=%h",
                  r.robTag.idx, (r.opcode == ALU_REMU) ? "REMU" : "DIVU", r.a, r.b);
+      end
+      else if (r.opcode == ALU_MUL) begin
+        reqQ.deq;
+        mulReq    <= r;
+        mulResult <= r.a * r.b;
+        mulPending <= True;
+        if (traceOn) $display("[ALU] mul start: rob=%0d a=%h b=%h", r.robTag.idx, r.a, r.b);
       end
       else begin
       reqQ.deq;
@@ -143,7 +174,6 @@ package ALU;
         ALU_LUI: res = r.b;
         ALU_AUIPC: res = r.pc + r.branchOffset;
         ALU_NOP: res = 32'd0;
-        ALU_MUL:  res = r.a * r.b;
         ALU_JAL: begin
           isBranch = True; isJump = True; actualTaken = True;
           actualTarget = r.pc + r.branchOffset;
@@ -226,7 +256,7 @@ package ALU;
     endmethod
 
     method Bool busy();
-      return flushReq[0] || reqQ.notEmpty || respQ.notEmpty || divSt != DIV_IDLE;
+      return flushReq[0] || reqQ.notEmpty || respQ.notEmpty || divSt != DIV_IDLE || mulPending;
     endmethod
 
   endmodule

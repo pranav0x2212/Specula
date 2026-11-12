@@ -163,9 +163,15 @@ verilog-check: $(VDIR)/mkSpeculaCore.v
 
 
 $(SYN_V): $(VDIR)/mkSpeculaCore.v
-	@awk '1; /^  input  RST_N;$$/ { \
-	  print "  wire [31:0] TASK_fopen___d3 = 0;   // synth shim (not architecture)"; \
-	  print "  wire [31:0] x__h8951 = 0;          // synth shim (not architecture)" }' \
+	@# bsc declares the results of $$fopen/$$fgetc as regs inside a translate_off block
+	@# ("declarations used by system tasks") but still reads them in visible assigns.
+	@# Re-declare every reg of that block as a constant-0 wire; no bsc hash names needed.
+	@awk '/declarations used by system tasks/ { sec = 1 } \
+	  sec && /synopsys translate_on/ { print; for (i = 0; i < n; i++) print w[i]; sec = 0; n = 0; next } \
+	  sec && /^[ \t]*reg[ \t]/ { l = $$0; sub(/^[ \t]*reg/, "  wire", l); \
+	    sub(/;[ \t]*$$/, " = 0;   // synth shim (not architecture)", l); w[n++] = l; shim++ } \
+	  { print } \
+	  END { if (!shim) print "[vivado] WARNING: no system-task declarations found to shim" > "/dev/stderr" }' \
 	  $< > $@
 	@echo "[vivado] synthesis-adjusted RTL -> $@"
 

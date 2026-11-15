@@ -7,9 +7,11 @@ package VirtioStub;
 
   Addr virtioBase = 32'h10001000;
 
+  // Disk image size in 32-bit words (1 MiB)
   typedef 262144 FsImgWords;
   typedef Bit#(TLog#(FsImgWords)) FsIdx;
 
+  // DMA engine states: walk the virtqueue, copy 1 KiB, write status and used ring, raise IRQ
   typedef enum {
     S_IDLE, S_AVAIL, S_RING,
     S_DESC0, S_HDR, S_DESC1, S_DESC2,
@@ -23,12 +25,14 @@ package VirtioStub;
     method VState   dbgState ();
   endinterface
 
+  // Legacy VirtIO-MMIO block device that DMAs straight into RAM
   module mkVirtioBlk#(Memory_IFC ram, Plic_IFC plic)(Virtio_IFC);
 
     RegFile#(FsIdx, Bit#(32)) fsimg <-
       mkRegFileLoad("fs.hex", 0, fromInteger(valueOf(FsImgWords) - 1));
 
     Reg#(Bit#(32)) pfnBase   <- mkReg(0);
+    // Latched QUEUE_NOTIFY (a pulse could be lost if the rule is blocked that cycle)
     Array#(Reg#(Bool)) kickPending <- mkCReg(2, False);
 
     Reg#(VState)   st         <- mkReg(S_IDLE);
@@ -44,12 +48,15 @@ package VirtioStub;
     Reg#(Bit#(32)) reqType    <- mkReg(0);
     Reg#(Bit#(32)) fsWordBase <- mkReg(0);
 
+    // Address of word w of descriptor d (16 bytes each)
     function Addr descWordAddr(Bit#(16) d, Bit#(9) w) =
       pfnBase + (zeroExtend(d) << 4) + (zeroExtend(w) << 2);
 
+    // One state-machine step per cycle, one RAM word each
     rule virtioStep (st != S_IDLE || kickPending[1]);
       Addr rdAddr = ?;
       case (st)
+        // Read address for the current state (avail idx, avail ring, descriptors, header, data)
         S_AVAIL:  rdAddr = pfnBase + 32'd128;
         S_RING:   rdAddr = pfnBase + ((32'd132 + (zeroExtend(lastAvail[2:0]) << 1)) & ~32'd3);
         S_DESC0:  rdAddr = descWordAddr(descHead, wi);
@@ -96,6 +103,7 @@ package VirtioStub;
           statusAddr <= rw; wi <= 0; st <= S_COPY;
         end
 
+        // Disk read (type 0): fs image -> RAM; write: RAM -> fs image
         S_COPY: begin
           if (reqType == 0) begin
             doWr = True; wrAddr = dataAddr + (zeroExtend(wi) << 2);
@@ -107,12 +115,14 @@ package VirtioStub;
           else wi <= wi + 1;
         end
 
+        // Write status byte 0 (OK) for the request
         S_STATUS: begin
           doWr = True; wrAddr = statusAddr;
           wrData = 32'h0; wrBe = 4'b0001 << statusAddr[1:0];
           wi <= 0; st <= S_USEDELEM;
         end
 
+        // Write used-ring element {id, len}
         S_USEDELEM: begin
           Addr eBase = pfnBase + 32'd4100 + (zeroExtend(usedIdx[2:0]) << 3);
           doWr = True; wrBe = 4'b1111;
@@ -120,6 +130,7 @@ package VirtioStub;
           else begin        wrAddr = eBase + 4;  wrData = 32'd1024; wi <= 0; st <= S_USEDIDX; end
         end
 
+        // Bump used.idx so the driver sees the completion
         S_USEDIDX: begin
           Bit#(16) nu = usedIdx + 1;
           doWr = True; wrAddr = pfnBase + 32'd4096; wrData = {nu, 16'd0}; wrBe = 4'b1100;
@@ -128,6 +139,7 @@ package VirtioStub;
           st <= S_DONE;
         end
 
+        // Raise the PLIC interrupt, then re-check for more work
         S_DONE: begin
           plic.setPending(5'd1);
           st <= S_AVAIL;
@@ -137,6 +149,7 @@ package VirtioStub;
       if (doWr) ram.writeWord(wrAddr, wrData, wrBe);
     endrule
 
+    // Read-only device registers the xv6 driver probes
     method Bit#(32) readWord(Addr a);
       Bit#(8) off = truncate(a - virtioBase);
       return (case (off)
@@ -154,6 +167,7 @@ package VirtioStub;
     method Action writeWord(Addr a, Bit#(32) data, Bit#(4) be);
       Bit#(8) off = truncate(a - virtioBase);
       case (off)
+        // Driver programs the queue base, then notifies
         8'h40:   pfnBase <= data << 12;  // QUEUE_PFN -> queue-area physical base
         8'h50:   kickPending[0] <= True;  // QUEUE_NOTIFY -> kick the engine
         default: noAction;               // PAGE_SIZE / SEL / NUM / DRIVER_FEATURES / ACK / STATUS

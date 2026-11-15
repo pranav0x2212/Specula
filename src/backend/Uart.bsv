@@ -14,19 +14,24 @@ package Uart;
     method Bool     dbgDlab();
   endinterface
 
+  // 16550-style UART: TX is printed line-by-line, RX is fed from uart_rx.in
   module mkUart(Uart_IFC);
     Reg#(Bool)                  dlab <- mkReg(False);
+    // Line buffer for TX output (flushed on newline)
     Vector#(128, Reg#(Bit#(8))) lbuf <- replicateM(mkReg(0));
     Reg#(Bit#(7))               lcol <- mkReg(0);
 
+    // RX FIFO fed from the input file
     FIFOF#(Bit#(8))             rxq    <- mkUGSizedFIFOF(16);
     Reg#(Bool)                  rxRdy  <- mkReg(False);   // registered rxq.notEmpty
     Reg#(Bit#(8))               rxHead <- mkReg(0);       // registered rxq.first
     Wire#(Maybe#(Bit#(8)))      rxObs  <- mkDWire(tagged Invalid);  // committed-RHR byte, published by doCommit
+    // Newlines printed so far; RX input starts after the boot banner
     Reg#(Bit#(8))               nls  <- mkReg(0);
     Reg#(File)                  inf  <- mkReg(InvalidFile);
     Reg#(Bool)                  opened <- mkReg(False);
 
+    // Transmit one byte to the console
     function Action emitByte(Bit#(8) c);
       action
 `ifdef INTERACTIVE_UART
@@ -51,12 +56,14 @@ package Uart;
       endaction
     endfunction
 
+    // Open the RX input file once
     rule openIn (!opened);
       let f <- $fopen("uart_rx.in", "r");
       inf <= f;
       opened <= True;
     endrule
 
+    // Register the FIFO status so MMIO reads do not depend on FIFO state combinationally
     rule mirrorRdy;
       rxRdy  <= rxq.notEmpty;
       rxHead <= rxq.first;
@@ -82,11 +89,13 @@ package Uart;
     endrule
 `endif
 
+    // Pop the RX byte only when a committed RHR read has seen it
     rule rxConsume (isValid(rxObs));
       if (rxq.notEmpty && rxq.first == validValue(rxObs))
         rxq.deq;
     endrule
 
+    // off 0 = RHR (received byte), off 5 = LSR (bit 0 = data ready, bit 5 = TX empty)
     method Bit#(32) readWord(Addr a);
       Bit#(3) off = truncate(a - uartBase);
       return (off == 0) ? (rxRdy ? zeroExtend(rxHead) : 32'h0) :
@@ -98,6 +107,7 @@ package Uart;
       Bit#(3) off = truncate(a - uartBase);
       Bit#(8) b   = truncate(data >> {a[1:0], 3'b000});
       case (off)
+        // THR write sends a byte (unless DLAB selects the divisor latch)
         0: if (!dlab) emitByte(b);
         3: dlab <= unpack(b[7]);
         default: noAction;

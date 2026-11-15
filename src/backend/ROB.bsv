@@ -7,6 +7,7 @@ import SpecialFIFOs::*;
 import Common::*;
 import RenameStage::*;
 
+// 32-entry circular reorder buffer
 typedef 32 NumEntries;
 
 typedef struct {
@@ -29,23 +30,31 @@ typedef struct {
 interface ROB_IFC;
   method Bool canAllocate();
   method Bool isEmpty();
+  // Allocate at the tail in program order; a decode-time fault is recorded here
   method ActionValue#(ROBTag) allocate(Maybe#(RegIndex) dst, Maybe#(PhysRegTag) physDst, Maybe#(PhysRegTag) oldPhysDst, Bool isStore, Bool startCompleted, Bool isBranch, Bit#(3) memFunct3, Bool faulted, Bit#(4) faultCause, Addr faultAddr);
   method Action writeResult(ROBTag tag, Data data);
   method Action markCompleted(ROBTag tag);
   method Action writeResultAndMark(ROBTag tag, Data data);
+  // Write back result, memory address, branch outcome and any deferred fault
   method Action completeEntry(ROBTag tag, Data data, Addr memAddr, Bool mispredicted, Addr redirectPC, Bool faulted, Bit#(4) faultCause);
+  // Oldest entry with its completion state, or Invalid if empty
   method Maybe#(Tuple2#(ROBTag, ROBEntry)) peekHead();
   method ROBTag headTag();     
+  // Retire the head and free the overwritten physical register
   method Action commitHead(RenameStage_IFC rename);
+  // Drop everything (mispredict / trap recovery)
   method Action flushAll();
 endinterface
 
 module mkROB(ROB_IFC);
 
   Vector#(NumEntries, Reg#(ROBEntry)) robEntries <- replicateM(mkRegU);
+  // Completion bits kept apart from the payload so they can be set independently
   Vector#(NumEntries, Reg#(Bool)) completionFlags <- replicateM(mkReg(False));
 
+  // Oldest entry (commit end)
   Reg#(UInt#(TLog#(NumEntries))) head <- mkReg(0);
+  // Next free entry (allocate end)
   Reg#(UInt#(TLog#(NumEntries))) tail <- mkReg(0);
   Reg#(UInt#(TAdd#(TLog#(NumEntries), 1))) count <- mkReg(0);
 

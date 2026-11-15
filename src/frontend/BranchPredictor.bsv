@@ -27,18 +27,24 @@ package BranchPredictor;
 
   interface BranchPredictor_IFC;
     method ActionValue#(PredictionResult) predict (Addr pc);
+    // Train the 2-bit counter, shift in the outcome, and record taken targets in the BTB
     method Action update(BranchUpdate upd);
+    // Install a target for jumps (no direction training)
     method Action updateBtb(Addr pc, Addr target);
+    // Clear speculative global history
     method Action flushHistory;
   endinterface
 
+  // gshare predictor (64-entry PHT) plus a 16-entry direct-mapped BTB
   module mkBranchPredictor(BranchPredictor_IFC);
+    // PHT starts weakly not-taken
     Vector#(64, Reg#(PHTEntry)) pht <- replicateM(mkReg(1));
     Vector#(16, Reg#(Tuple3#(Bool, Bit#(24), Addr))) btb <- replicateM(mkReg(tuple3(False, 0, 0)));
     Reg#(GlobalHistory) globalHistory <- mkReg(0);
 
     method ActionValue#(PredictionResult) predict (Addr pc);
       PHT_Index pc_hash = truncate(pc >> 2);
+      // gshare index = history XOR PC bits
       PHT_Index pht_idx = truncate(globalHistory ^ pc_hash);
       PHTEntry counter = pht[pht_idx];
       Bool predicted_taken = (counter >= 2);
@@ -46,6 +52,7 @@ package BranchPredictor;
       Bit#(4) btb_idx = truncate(pc >> 2);
       match {.btb_valid, .btb_tag, .btb_target} = btb[btb_idx];
 
+      // BTB hit needs a valid entry with a matching tag
       Bool btb_hit = btb_valid && (btb_tag == truncate(pc >> 6));
       Addr target = btb_hit ? btb_target : (pc + 4);
 

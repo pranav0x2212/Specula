@@ -4,15 +4,19 @@ package FreeList;
   import Vector::*;
 
   interface FreeList_IFC;
+    // Two-level priority pick: lowest free reg inside each group of 8, then lowest group
     method ActionValue#(Maybe#(PhysRegTag)) tryAllocate();
     method Action free(PhysRegTag tag);
     method Bool hasFree();
+    // Rebuild the free list after a mispredict from the checkpointed map
     method Action restoreExact(Vector#(NUM_PHYS_REGS, Bool) freeVec);
   endinterface
 
+  // Free physical-register bitmap (True = free); allocates the lowest-numbered free reg
   module mkFreeList(FreeList_IFC);
 
     Vector#(NUM_PHYS_REGS, Reg#(Bool)) freelist <- replicateM(mkReg(True));
+    // p0 is reserved for x0 and never allocated
     rule init_p0;
       freelist[0] <= False;
     endrule

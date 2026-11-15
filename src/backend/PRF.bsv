@@ -9,20 +9,24 @@ package PRF;
     method Action write(PhysRegTag tag, Data val);
     method Bool isReady(PhysRegTag tag);
     method Action markReady(PhysRegTag tag);
+    // Mark a freshly allocated register as not-yet-written (p0 is exempt)
     method Action clear(PhysRegTag tag);
   endinterface
 
+  // Physical register file with a per-register ready bit
   module mkPRF (PRF);
 
     Vector#(NUM_PHYS_REGS, Reg#(Data)) regs <- replicateM(mkRegU);
     Vector#(NUM_PHYS_REGS, Reg#(Bool)) readyBits <- replicateM(mkReg(False));
 
+    // p0 is hard-wired to zero and always ready
     rule init_x0;
       regs[0] <= 0;
       readyBits[0] <= True;
     endrule
 
     method Maybe#(Data) read(PhysRegTag tag);
+      // Reads only return a value once the producer has written it
       if (readyBits[tag]) 
         return Valid(regs[tag]);
       else 

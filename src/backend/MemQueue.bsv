@@ -3,6 +3,7 @@ package MemQueue;
   import Common::*;
   import Vector::*;
 
+  // Queue of loads/stores/AMOs waiting for memory issue (any-order, not FIFO)
   typedef 8 MEMQ_SIZE;
   typedef UInt#(TLog#(MEMQ_SIZE)) MemQIdx;
 
@@ -24,16 +25,20 @@ package MemQueue;
     method Bool notEmpty;
     method Vector#(MEMQ_SIZE, Bool) validMask;
     method Vector#(MEMQ_SIZE, MemQEntry) peekAll;
+    // Free the slot(s) selected by the one-hot issue mask
     method Action issueOH(Vector#(MEMQ_SIZE, Bool) oh);
     method Action flush();
   endinterface
 
   module mkMemQueue(MemQueue_IFC);
     Vector#(MEMQ_SIZE, Reg#(MemQEntry))    payload <- replicateM(mkRegU);
+    // CReg valid bits: port 0 issue, port 1 enqueue, port 2 flush
     Vector#(MEMQ_SIZE, Array#(Reg#(Bool))) valid   <- replicateM(mkCReg(3, False));
+    // Registered copy of valid bits so free-slot search stays off the critical path
     Reg#(Bit#(MEMQ_SIZE)) validSnap <- mkReg(0);
 
     (* fire_when_enabled, no_implicit_conditions *)
+    // Capture occupancy each cycle
     rule snapshot;
       Bit#(MEMQ_SIZE) s = 0;
       for (Integer i = 0; i < valueOf(MEMQ_SIZE); i = i + 1)
@@ -41,6 +46,7 @@ package MemQueue;
       validSnap <= s;
     endrule
 
+    // Lowest free slot
     function Maybe#(MemQIdx) firstFree();
       Maybe#(MemQIdx) r = tagged Invalid;
       for (Integer i = valueOf(MEMQ_SIZE) - 1; i >= 0; i = i - 1)

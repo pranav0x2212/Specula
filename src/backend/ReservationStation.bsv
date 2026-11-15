@@ -3,24 +3,29 @@ package ReservationStation;
   import Common::*;
   import Vector::*;
 
+  // Unified reservation station: instructions wait here until both operands are ready
   typedef 8 RS_SIZE;
   typedef UInt#(TLog#(RS_SIZE)) RSIdx;
 
   interface ReservationStationIfc;
     method Action enq(RSEntry entry);
+    // Issue the first ready entry
     method ActionValue#(RSEntry) deq();
     method Bool notFull;
     method Bool notEmpty;
+    // Broadcast a result tag: mark matching source operands ready
     method Action wakeup(PhysRegTag tag);
     method Action flush();  
   endinterface
 
   module mkReservationStation(ReservationStationIfc);
     Vector#(RS_SIZE, Reg#(RSEntry))       payload <- replicateM(mkRegU);
+    // CReg ports: 0 = issue/ready check, 1 = enqueue/wakeup, 2 = flush
     Vector#(RS_SIZE, Array#(Reg#(Bool)))  valid   <- replicateM(mkCReg(3, False));
     Vector#(RS_SIZE, Array#(Reg#(Bool)))  s1Ready <- replicateM(mkCReg(3, False));
     Vector#(RS_SIZE, Array#(Reg#(Bool)))  s2Ready <- replicateM(mkCReg(3, False));
 
+    // Lets notFull see a slot freed by deq in the same cycle
     PulseWire deqFired    <- mkPulseWire;
     Wire#(Bool) anyFreeNow <- mkBypassWire;
 
@@ -39,6 +44,7 @@ package ReservationStation;
       return r;
     endfunction
 
+    // Oldest-index entry whose operands are both ready
     function Maybe#(RSIdx) firstReady();
       Maybe#(RSIdx) r = tagged Invalid;
       for (Integer i = valueOf(RS_SIZE) - 1; i >= 0; i = i - 1)

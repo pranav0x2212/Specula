@@ -7,22 +7,28 @@ package RenameStage;
   interface RenameStage_IFC;
     method Action start(Decoded d);
     method Decoded getCurrent();
+    // Returns (new phys reg, old phys reg to free at commit, success)
     method ActionValue#(Tuple3#(PhysRegTag, Maybe#(PhysRegTag), Bool)) allocateDestReg(RegIndex rd);
+    // Overwrite a mapping directly
     method Action updateMapping(RegIndex rd, PhysRegTag physTag);
     method PhysRegTag lookupMapping(RegIndex r);
     method Bool isWritten(RegIndex r);
     method Action freeReg(PhysRegTag tag);
     method Bool hasPhysFree();
+    // Snapshot the map, including the allocation made by this same instruction
     method Action checkpoint(Maybe#(Tuple2#(RegIndex, PhysRegTag)) alloc);
+    // Restore the map and rebuild the free list as everything not referenced by the snapshot
     method Action restoreCheckpoint();
   endinterface
 
   module mkRenameStage(RenameStage_IFC);
+    // Speculative arch->physical map and a written flag per arch register
     Vector#(32, Reg#(PhysRegTag)) archRegMap <- replicateM(mkReg(0));
     Vector#(32, Reg#(Bool)) archRegWritten <- replicateM(mkReg(False));
     FreeList_IFC freelist <- mkFreeList;
 
     Reg#(Decoded) currentInstr <- mkRegU;
+    // Checkpoint copy of the map, restored on a branch mispredict
     Reg#(Vector#(32, PhysRegTag))            shadowMap     <- mkRegU;
     Reg#(Vector#(32, Bool))                  shadowWritten <- mkRegU;
 

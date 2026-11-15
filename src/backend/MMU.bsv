@@ -18,8 +18,10 @@ package MMU;
             endcase);
   endfunction
 
+  // A PTE is a leaf if any of R/W/X is set
   function Bool isLeafPTE(Bit#(32) pte) = (pte[3:1] != 3'b000);
 
+  // Check the R/W/X permission for this access kind (W without R is reserved)
   function Bool leafPermitted(Bit#(32) pte, AccessKind k);
     Bool r = (pte[1] == 1'b1);
     Bool w = (pte[2] == 1'b1);
@@ -39,6 +41,7 @@ package MMU;
   function TransResult transOK(Bit#(32) pa) =
     TransResult { pa: pa, fault: False, cause: 4'd0 };
 
+  // Sv32 two-level page walk (combinational); bare mode passes VA through as PA
   function TransResult sv32TranslateP(Bit#(32)   va,
                                       AccessKind kind,
                                       Bool       paging,
@@ -55,13 +58,16 @@ package MMU;
       Bit#(10) vpn0 = va[21:12];
       Bit#(12) off  = va[11:0];
 
+      // Level-1 PTE from the root table, then level-0 PTE from the table it points to
       Bit#(32) pte1  = rootRead({ satp[19:0], vpn1, 2'b00 });
       Bit#(32) pte0  = physRead({ pte1[29:10], vpn0, 2'b00 });
+      // Level-1 leaf = 4 MiB superpage
       Bool     leaf1 = isLeafPTE(pte1);
 
       Bool bad1  = !rootOk || pte1[0] != 1'b1;
       Bool badL1 = pte1[19:10] != 10'd0 || !leafPermitted(pte1, kind);
       Bool bad0  = pte0[0] != 1'b1 || !isLeafPTE(pte0) || !leafPermitted(pte0, kind);
+      // Fault if the L1 PTE is invalid or the selected leaf is invalid/not permitted
       Bool flt   = bad1 || (leaf1 ? badL1 : bad0);
 
       res = TransResult { pa:    leaf1 ? { pte1[29:20], va[21:0] } : { pte0[29:10], off },
@@ -72,6 +78,7 @@ package MMU;
     return res;
   endfunction
 
+  // Convenience wrapper: paging is on when satp.MODE=1 and not in M-mode
   function TransResult sv32Translate(Bit#(32)   va,
                                      AccessKind kind,
                                      Bit#(2)    priv,

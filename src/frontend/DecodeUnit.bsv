@@ -7,6 +7,7 @@ package DecodeUnit;
     method Decoded getDecoded();
   endinterface
 
+  // Registers the decoded form of one instruction (reset value is a NOP: addi x0,x0,0)
   module mkDecodeUnit(IfcDecodeUnit);
     Reg#(Decoded) decoded <- mkReg(Decoded {
       opcode: ALU_ADD,
@@ -20,6 +21,7 @@ package DecodeUnit;
     });
 
     method Action start(Instruction instr, Bit#(32) pc);
+      // Pure combinational decode from Common, latched into a register
       decoded <= decode(instr, pc);
     endmethod
 

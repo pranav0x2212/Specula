@@ -11,6 +11,7 @@ package RAT;
     method Action clear(RegIndex r);
   endinterface
 
+  // Register alias table: arch reg -> in-flight ROB tag (Invalid = value is in the register file)
   module mkRAT(RAT_IFC);
 
     Vector#(32, Reg#(Maybe#(ROBTagT))) ratTable <- replicateM(mkReg(tagged Invalid));
@@ -20,6 +21,7 @@ package RAT;
     endmethod
 
     method Action rename(RegIndex r, ROBTagT tag);
+      // x0 is never renamed
       if (r != 0)
         ratTable[r] <= tagged Valid tag;
     endmethod

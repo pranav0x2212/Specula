@@ -4,6 +4,7 @@ package LSU;
   import Vector::*;
   import UnifiedMemory::*;
 
+  // Store queue (8 entries): stores execute early but write memory only at commit
   typedef 8 SQ_SIZE;
 
   typedef struct {
@@ -14,6 +15,7 @@ package LSU;
     Bit#(4) be;
   } SQEntry deriving (Bits, FShow);
 
+  // Byte-enable lanes for SB/SH/SW
   function Bit#(4) storeByteEnable(Bit#(3) funct3, Bit#(2) off);
     return (case (funct3)
               3'b000:  (4'b0001 << off);   // SB
@@ -22,6 +24,7 @@ package LSU;
             endcase);
   endfunction
 
+  // Shift store data into its byte lane
   function Data positionStoreData(Data raw, Bit#(2) off);
     return raw << {off, 3'b000};
   endfunction
@@ -31,6 +34,7 @@ package LSU;
   function Data sext16(Bit#(16) x) = (x[15] == 1'b1) ? { 16'hFFFF, x }   : { 16'h0000, x };
   function Data zext16(Bit#(16) x) = { 16'h0000, x };
 
+  // Pick and sign/zero-extend the loaded bytes for LB/LH/LBU/LHU/LW
   function Data loadExtract(Data word, Bit#(2) off, Bit#(3) funct3);
     Bit#(8)  b  = truncate(word >> {off, 3'b000});
     Bit#(16) hw = truncate(word >> {off, 3'b000});
@@ -43,6 +47,7 @@ package LSU;
             endcase);
   endfunction
 
+  // Halfword/word accesses must be naturally aligned
   function Bool isMisalignedAccess(Bit#(3) funct3, Addr addr);
     return (case (funct3)
               3'b001, 3'b101: (addr[0]   != 1'b0);
@@ -56,17 +61,24 @@ package LSU;
     Bit#(8) byt;
   } FwdCand deriving (Bits);
 
+  // Choose the younger matching store (larger key) for forwarding
   function FwdCand fwdPick(FwdCand a, FwdCand b) = (a.key >= b.key) ? a : b;
 
   interface IfcLSU;
     method ActionValue#(Data) load(Addr addr);
+    // Reserve a store-queue slot at dispatch
     method Action sqAllocate();
     method SQPtr  sqTailMark();
+    // Fill in address, byte-enables and data once the store executes
     method Action sqExecStore(SQPtr slot, Addr addr, Data rawData, Bit#(3) funct3);
+    // Write the store to memory/MMIO (called at commit)
     method Action storeToMem(Addr addr, Data rawData, Bit#(3) funct3);
+    // Retire the oldest store-queue entry
     method Action sqPop();
     method Bool   sqOlderStorePending(SQPtr loadWm);
+    // Per-byte store-to-load forwarding from older stores; returns (covered lanes, merged data)
     method Tuple2#(Bit#(4), Data) sqForward(Addr addr, SQPtr loadWm);
+    // Drop all pending stores on recovery
     method Action sqFlush();
     method Bool   sqEmpty();
     method Bool   sqNotFull();
@@ -79,6 +91,7 @@ package LSU;
     Reg#(SQPtr) sqHead <- mkReg(0);
     Reg#(SQPtr) sqTail <- mkReg(0);
 
+    // Bitmask of stores whose address/data are computed
     Array#(Reg#(Bit#(SQ_SIZE))) sqExecd <- mkCReg(3, 0);
 
     function Bit#(3) slotOf(SQPtr p) = truncate(p);
@@ -135,6 +148,7 @@ package LSU;
       sqHead <= sqHead + 1;
     endmethod
 
+    // True if an older store has not yet computed its address (load must wait)
     method Bool sqOlderStorePending(SQPtr loadWm);
       Bit#(3) h3        = slotOf(sqHead);
       SQPtr   olderLive = loadWm - sqHead;

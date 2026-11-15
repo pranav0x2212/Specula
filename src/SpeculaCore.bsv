@@ -19,6 +19,7 @@ package SpeculaCore;
   import FIFOF::*;
   import Vector::*;
 
+  // Result of a memory op travelling from issue to writeback
   typedef struct {
     Bool       isLoad;
     Bool       isAmo;
@@ -60,7 +61,9 @@ package SpeculaCore;
     ROBTag     robTag;
   } SysMeta deriving (Bits, FShow);
 
+  // Top level: out-of-order RV32 core (fetch > decode > rename > RS/MemQ > ALU/LSU > ROB commit)
   module mkSpeculaCore(Empty);
+    // RAM plus UART, VirtIO and PLIC
     Memory_IFC mem <- mkSystemBus;
 
     function Bit#(32) physRd(Bit#(32) a) = mem.physReadWord(a);
@@ -78,33 +81,43 @@ package SpeculaCore;
     BranchPredictor_IFC bp <- mkBranchPredictor;
 
     CSRFile_IFC     csr        <- mkCSRFile;
+    // Current privilege (11=M, 01=S, 00=U)
     Reg#(Bit#(2))   priv       <- mkReg(2'b11);   // reset in M-mode
+    // Sv32 translation active for the current privilege
     Reg#(Bool)      paging     <- mkReg(False);
+    // satp root table lies in RAM (otherwise every walk faults)
     Reg#(Bool)      rootInRam  <- mkReg(False);
     Reg#(Bool)      serInFlight <- mkReg(False);  // set at fetch, cleared at commit; freezes fetch
+    // A faulting fetch is in the pipe; fetch stops until it commits or is flushed
     Reg#(Bool)      ifFaultInFlight <- mkReg(False);
     Reg#(Bool)      sysArmed    <- mkReg(False);  // set at dispatch, cleared at commit; gates the commit handler
     Reg#(SysMeta)   sysMeta     <- mkRegU;
 
+    // Supervisor external-interrupt request from the PLIC
     Wire#(Bool)     supExtReq   <- mkDWire(False);
 
     rule pumpExtInt;
       supExtReq <= mem.extIntReq();
     endrule
 
+    // Buffer between memory issue and writeback
     FIFOF#(MemResult) memResultQ <- mkSizedFIFOF(4);
 
+    // Memory pipeline: select (selEntry) > AGU (agReg) > issue
     Reg#(MemQEntry)    selEntry <- mkRegU;
     Array#(Reg#(Bool)) selValid <- mkCReg(3, False);
     Reg#(MemAgu)       agReg    <- mkRegU;
     Array#(Reg#(Bool)) agValid  <- mkCReg(3, False);
 
+    // A store here ends the simulation (riscv-tests convention)
     Addr      tohostAddr = 32'h00100000;
+    // End of physical RAM
     Bit#(32)  maxPC      = fromInteger(memBaseAddr + valueOf(MemWords) * 4);
 
     Reg#(Bit#(32)) pc <- mkReg(fromInteger(memBaseAddr));
     Reg#(Bool) halted <- mkReg(False);
     Reg#(Bool) terminating <- mkReg(False);
+    // Set on a mispredict; backend is drained and rebuilt before fetch resumes
     Reg#(Bool) flushPending <- mkReg(False);
     Reg#(Bool) mmuFault <- mkReg(False);
     Reg#(UInt#(32)) cycleCount <- mkReg(0);
@@ -119,17 +132,23 @@ package SpeculaCore;
       endaction;
     endfunction
 
+    // Predicted next PC of the in-flight control-flow instruction
     Array#(Reg#(Bit#(32))) brPredNextPC  <- mkCReg(2, 0);
+    // One unresolved branch at a time
     Array#(Reg#(Bool))  brOutstanding    <- mkCReg(2, False);
     Reg#(Bit#(32))      recoverPC        <- mkReg(0);
     Reg#(Bool)          recoveryComplete <- mkReg(False);
 
+    // A branch/jump has been fetched but not yet executed
     Array#(Reg#(Bool))  cfInFlight       <- mkCReg(3, False);
 
+    // Front-end queues; the Maybe carries a deferred i-fetch fault cause
     FIFOF#(Tuple4#(Bit#(32), Instruction, Bit#(32), Maybe#(Bit#(4)))) fetchedQ <- mkFIFOF();
     FIFOF#(Tuple4#(Bit#(32), Decoded, Bit#(32), Maybe#(Bit#(4))))     decodedQ <- mkFIFOF();
+    // Instructions waiting for dispatch
     FIFOF#(RenamedInstr) renamedInstrQ <- mkSizedFIFOF(8);
 
+    // Fetch one instruction, predict control flow, and advance the PC
     rule doFetch (!halted && !terminating && !flushPending && !mmuFault && !serInFlight && !ifFaultInFlight
                   && (pc < maxPC || paging)
                   && !(cfInFlight[0] && !fetch.at(pc, csr.satpValue, paging, rootInRam).fault
@@ -143,6 +162,7 @@ package SpeculaCore;
         if (!interactiveMode)
           $display("[MMU] instruction page fault (speculative, deferred to commit): va=%h priv=%b satp=%h cause=%0d",
                    pc, priv, csr.satpValue, fs.faultCause);
+        // Enqueue a NOP tagged with the fault; the fault is raised only if it reaches commit
         fetchedQ.enq(tuple4(pc, 32'h00000013, pc + 4, tagged Valid fs.faultCause));
         ifFaultInFlight <= True;
         pc <= fs.npc;
@@ -156,6 +176,7 @@ package SpeculaCore;
         Bool isJalr       = fs.pdJalr;
         Bool isCF         = isJal || isJalr || isCondBranch;
         Bit#(32) jalTarget = pc + fs.pdJalImm;
+        // Predicted next PC: JAL target, BTB for JALR, predictor for branches
         Bit#(32) predNext =
             isJal  ? jalTarget :
             isJalr ? (pr.btbHit ? pr.btbTarget : fs.npc) :
@@ -168,6 +189,7 @@ package SpeculaCore;
                    pc, isCondBranch ? "branch" : "jump", predNext);
         end
 
+        // CSR/xRET/ECALL: stop fetching until it retires
         if (fs.pdSer) begin
           serInFlight <= True;
           if (traceOn) $display("[FETCH] SYSTEM @ %h : serializing - fetch frozen until retire", pc);
@@ -179,6 +201,7 @@ package SpeculaCore;
       end
     endrule
 
+    // Decode the fetched instruction
     rule doDecode (!flushPending);
       match {.fpc, .instr, .fallpc, .flt} = fetchedQ.first;
       fetchedQ.deq;
@@ -186,6 +209,7 @@ package SpeculaCore;
       decodedQ.enq(tuple4(fpc, decode(instr, fpc), fallpc, flt));
     endrule
 
+    // Pass decoded instructions to the dispatch buffer
     rule doRename (!flushPending && renamedInstrQ.notFull);
       match {.fpc, .d, .fallpc, .flt} = decodedQ.first;
       decodedQ.deq;
@@ -206,6 +230,7 @@ package SpeculaCore;
       if (traceOn) $display("[DISPATCH] Enqueued to buffer: rd=x%0d opcode=%0d", d.rd, d.opcode);
     endrule
 
+    // Mispredict recovery: flush every queue, restore the rename checkpoint, redirect the PC
     rule doRecover (flushPending && !recoveryComplete);
       if (traceOn) $display("[RECOVER] misprediction: flushing backend, restoring rename state, redirect PC -> %h", recoverPC);
       recoverCount <= recoverCount + 1;
@@ -232,12 +257,14 @@ package SpeculaCore;
       recoveryComplete <= True;
     endrule
 
+    // Resume fetch once the ALU pipeline is empty
     rule doRecoverDone (flushPending && recoveryComplete && !alu.busy);
       if (traceOn) $display("[RECOVER] backend clean, resuming fetch at %h", recoverPC);
       flushPending <= False;
       recoveryComplete <= False;
     endrule
 
+    // Rename registers and allocate a ROB entry, then send to RS, MemQueue or the system-op path
     rule doDispatch (renamedInstrQ.notEmpty && !flushPending
                      && rob.canAllocate
                      && (renamedInstrQ.first.faulted
@@ -253,6 +280,7 @@ package SpeculaCore;
       Bool isLoad = (r.instr.opcode == ALU_LW);
       Bool isAmo  = (r.instr.opcode == ALU_AMOSWAP);
 
+      // Faulting fetch: allocate an already-completed ROB entry carrying the fault
       if (r.faulted) begin
         renamedInstrQ.deq;
         let robTag <- rob.allocate(tagged Invalid, tagged Invalid, tagged Invalid,
@@ -260,6 +288,7 @@ package SpeculaCore;
                                    True, r.faultCause, r.pc);
         if (traceOn) $display("[DISPATCH] i-fetch fault rob=%0d : va=%h cause=%0d (poison, deferred to commit)",
                  robTag.idx, r.pc, r.faultCause);
+      // CSR/MRET/SRET/ECALL: executed at commit, not through the RS
       end else if (isSerializingOp(r.instr.opcode)) begin
         Bool     isMretI   = isMretOp(r.instr.opcode);
         Bool     isSretI   = isSretOp(r.instr.opcode);
@@ -309,6 +338,7 @@ package SpeculaCore;
                    isMretI ? "MRET" : (isSretI ? "SRET" : (isEcallI ? "ECALL" : "CSR")),
                    robTag.idx, csrAddr, f3, isImmForm, r.instr.rd);
         end
+      // Load/store/AMO: goes to the MemQueue, stores also reserve a store-queue slot
       end else if (isMemoryOp) begin
         PhysRegTag destTag = 0;
         Maybe#(PhysRegTag) oldPhysDst = tagged Invalid;
@@ -339,6 +369,7 @@ package SpeculaCore;
           PhysRegTag basePhys = rename.lookupMapping(r.instr.rs1);
           PhysRegTag dataPhys = rename.lookupMapping(r.instr.rs2);
 
+          // Store-queue watermark: stores older than this load
           SQPtr sqWm0 = lsu.sqTailMark();
 
           if (!isLoad)
@@ -375,6 +406,7 @@ package SpeculaCore;
             let robTag <- rob.allocate(tagged Valid r.instr.rd, (r.instr.rd == 0 ? tagged Invalid : tagged Valid destTag), oldPhysDst, False, False, isCF, 3'b000, False, 0, 0);
 
             if (isCF) begin
+              // Snapshot rename state so a mispredict can restore it
               rename.checkpoint(r.instr.rd != 0 ? tagged Valid tuple2(r.instr.rd, destTag) : tagged Invalid);
               brOutstanding[0] <= True;
               if (traceOn) $display("[DISPATCH] %s rob=%0d : rename + free-list checkpoint taken",
@@ -411,11 +443,13 @@ package SpeculaCore;
     endrule
 
 
+    // Cycle counter (used by the watchdog)
     rule incrementCycles;
       if (traceOn) $display("=== cycle %0d ===", cycleCount);
       cycleCount <= cycleCount + 1;
     endrule
 
+    // Stop when fetch runs off the end of RAM or the cycle limit is hit
     rule doHalt (!halted && !flushPending && ((pc >= maxPC
                               && !paging
                               && !fetchedQ.notEmpty && !decodedQ.notEmpty
@@ -429,6 +463,7 @@ package SpeculaCore;
       halted <= True;
     endrule
 
+    // Finish once all in-flight work has drained
     rule doTerminate ((halted || terminating) && !flushPending && !rs.notEmpty && !alu.notEmpty
                       && !memQ.notEmpty && lsu.sqEmpty && !memResultQ.notEmpty
                       && rob.isEmpty());
@@ -437,17 +472,20 @@ package SpeculaCore;
       $finish();
     endrule
 
+    // Halt on a fatal translation fault
     rule doMmuFaultHalt (mmuFault);
       $display("[Specula] halted: Sv32 translation fault (non-precise speculative fault model, M17)");
       printSummary;
       $finish(0);
     endrule
 
+    // Retire the oldest ROB entry in order: branches, stores, faults, register writes
     rule doCommit (!flushPending);
       let maybeHead = rob.peekHead();
       if (maybeHead matches tagged Valid .headInfo) begin
         match {.tag, .entry} = headInfo;
         if (sysArmed && tag.idx == sysMeta.robTag.idx) begin
+        // Fault reached commit, so it is architectural (precise trap delivery not implemented)
         end else if (entry.completed && entry.faulted) begin
           $display("[MMU] page fault at retire (architectural): addr=%h cause=%0d", entry.memAddr, entry.faultCause);
           $display("[Specula] halted: Sv32 translation fault (non-precise speculative fault model, M17)");
@@ -457,12 +495,14 @@ package SpeculaCore;
           if (entry.isBranch) begin
             if (entry.mispredicted) begin
               if (traceOn) $display("[COMMIT] branch rob=%0d MISPREDICTED -> trigger recovery, redirect PC = %h", tag.idx, entry.redirectPC);
+              // Mispredicted branch reaches commit: start recovery
               recoverPC    <= entry.redirectPC;
               flushPending <= True;
             end else begin
               if (traceOn) $display("[COMMIT] branch rob=%0d resolved correctly", tag.idx);
             end
           end else if (entry.isStore) begin
+            // Store commits: write memory only now, so wrong-path stores never land
             lsu.sqPop();
             if (entry.memAddr == tohostAddr) begin
               $display("[Specula] tohost store retired: addr=%h data=%0d", entry.memAddr, entry.data);
@@ -479,6 +519,7 @@ package SpeculaCore;
               if (traceOn) $display("[COMMIT] store rob=%0d retired (addr=%h funct3=%b raw=%h)", tag.idx, entry.memAddr, entry.memFunct3, entry.data);
             end
           end else if (entry.dst matches tagged Valid .dstReg) begin
+            // Consume the UART RX byte only when the RHR load really commits
             if (entry.memAddr == 32'h10000000) mem.uartRxObserved(entry.data[7:0]);
             if (traceOn) $display("[COMMIT] rob=%0d committed: x%0d <- %0d", tag.idx, dstReg, entry.data);
           end
@@ -487,6 +528,7 @@ package SpeculaCore;
         end
       end
     endrule
+    // Execute CSR/MRET/SRET/ECALL at commit (fetch is frozen, so this is non-speculative)
     rule doCommitSys (!flushPending && serInFlight && sysArmed
                       && rob.headTag.idx == sysMeta.robTag.idx);
       if (sysMeta.isMret) begin
@@ -512,6 +554,7 @@ package SpeculaCore;
         paging <= csr.satpValue[31] == 1'b1;
         pc   <= tvec;
       end else begin
+        // CSR read-modify-write; rd gets the old value
         Bit#(32) oldv = csr.csrRead(sysMeta.csrAddr);
         Bit#(32) src  = sysMeta.isImm
                           ? zeroExtend(sysMeta.rs1Zimm)
@@ -521,6 +564,7 @@ package SpeculaCore;
         if (wen) begin
           csr.csrWrite(sysMeta.csrAddr, newv);
           if (sysMeta.csrAddr == csrSatp) begin
+            // satp write: re-evaluate paging and check the root table is in RAM
             paging    <= newv[31] == 1'b1 && priv != 2'b11;
             rootInRam <= ramContains({newv[19:0], 12'd0});
           end
@@ -539,6 +583,7 @@ package SpeculaCore;
       serInFlight <= False;
     endrule
 
+    // Take a supervisor external interrupt only with the pipeline fully drained
     rule doTakeExtInt (supExtReq && !halted && !terminating && !flushPending && !mmuFault
                        && !serInFlight && !sysArmed
                        && (priv == 2'b00 || priv == 2'b01)
@@ -556,6 +601,7 @@ package SpeculaCore;
       pc   <= tvec;
     endrule
 
+    // Read operands for the oldest ready RS entry and send it to the ALU
     rule doExecute (rs.notEmpty && alu.notFull && !flushPending);
       let rsEntry <- rs.deq();
       if (traceOn) $display("[Execute] Dequeued RS entry: op=%0d dest=p%0d rob=%0d", rsEntry.opcode, rsEntry.dest, rsEntry.robTag.idx);
@@ -581,6 +627,7 @@ package SpeculaCore;
       if (traceOn) $display("[Execute] Sent to ALU: op=%0d a=%0d b=%0d dest=p%0d rob=%0d (useImm=%0d)", rsEntry.opcode, aVal, bVal, rsEntry.dest, rsEntry.robTag.idx, rsEntry.useImmediate);
     endrule
 
+    // Which MemQueue entries can issue: operands ready and no older unresolved store
     function Vector#(MEMQ_SIZE, Bool) memIssuableMask();
       Vector#(MEMQ_SIZE, Bool)      vmask   = memQ.validMask;
       Vector#(MEMQ_SIZE, MemQEntry) entries = memQ.peekAll;
@@ -606,6 +653,7 @@ package SpeculaCore;
       return any;
     endfunction
 
+    // Pick the oldest issuable memory op (age relative to ROB head)
     rule doMemSelect (!flushPending && !mmuFault && !selValid[1] && memIssuableExists);
       ROBTag hTag = rob.headTag;
       Vector#(MEMQ_SIZE, MemQEntry) entries = memQ.peekAll;
@@ -635,6 +683,7 @@ package SpeculaCore;
       end
     endrule
 
+    // Compute the address, translate it, and record the store address in the SQ
     rule doMemAgu (!flushPending && !mmuFault && selValid[0] && !agValid[1]);
       let e = selEntry;
       selValid[0] <= False;
@@ -655,6 +704,7 @@ package SpeculaCore;
       agValid[1] <= True;
     endrule
 
+    // Do the load/AMO (store-queue forwarding first, then memory); faults are only recorded
     rule doMemIssue (!flushPending && !mmuFault && memResultQ.notFull && agValid[0]);
         let e = agReg;
         agValid[0] <= False;
@@ -670,6 +720,7 @@ package SpeculaCore;
           $display("[LSU] MISALIGNED %s addr=%h funct3=%b - unsupported (M5), operating on the containing word only",
                    e.isLoad ? "load" : "store", addr, e.funct3);
 
+        // AMOSWAP: read the old value, the new value is written at commit
         if (!xlateFault && e.isAmo) begin
           match {.covered, .fwdWord} = lsu.sqForward(addr, e.sqWm);
           Data full = fwdWord;
@@ -705,11 +756,13 @@ package SpeculaCore;
         end
     endrule
 
+    // ALU result: write ROB/PRF, wake dependents, resolve branches and train the predictor
     rule doWriteback (alu.notEmpty);
       let aluResp <- alu.deq();
 
       if (aluResp.isBranch) begin
         Bit#(32) actualNextPC = aluResp.actualTaken ? aluResp.actualTarget : aluResp.fallPC;
+        // Compare the real next PC against the prediction
         Bool mispred = (actualNextPC != brPredNextPC[0]);
 
         rob.completeEntry(aluResp.robTag, aluResp.result, 0, mispred, actualNextPC, False, 0);
@@ -777,6 +830,7 @@ package SpeculaCore;
     (* descending_urgency = "doMemWriteback, doTakeExtInt" *)
     (* descending_urgency = "doTakeExtInt,   doFetch"      *)
     (* descending_urgency = "doWriteback,    doFetch"      *)
+    // Memory result: extract the loaded bytes, write ROB/PRF and wake dependents
     rule doMemWriteback (memResultQ.notEmpty);
       let mr = memResultQ.first; memResultQ.deq;
       Data ldVal = loadExtract(mr.rdData, mr.addr[1:0], mr.funct3);

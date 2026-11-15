@@ -2,8 +2,10 @@ package RVCExpand;
 
   import Common::*;
 
+  // All-zero word is an illegal instruction: used for reserved/unsupported encodings
   Instruction rvcIll = 32'h00000000;
 
+  // Encoders that build a 32-bit instruction from fields (R/I/S/B/U/J)
   function Instruction encR(Bit#(7) f7, Bit#(5) rs2, Bit#(5) rs1, Bit#(3) f3, Bit#(5) rd, Bit#(7) op)
     = { f7, rs2, rs1, f3, rd, op };
   function Instruction encI(Bit#(12) imm, Bit#(5) rs1, Bit#(3) f3, Bit#(5) rd, Bit#(7) op)
@@ -17,6 +19,7 @@ package RVCExpand;
   function Instruction encJ(Bit#(21) imm, Bit#(5) rd, Bit#(7) op)
     = { imm[20], imm[10:1], imm[11], imm[19:12], rd, op };
 
+  // Compressed 3-bit register field maps to x8..x15
   function Bit#(5) rvcReg(Bit#(3) x) = { 2'b01, x };
   function Bit#(12) sImm6 (Bit#(6)  v) = (v[5] == 1'b1) ? { 6'h3F, v } : { 6'h00, v };
   function Bit#(12) sImm10(Bit#(10) v) = (v[9] == 1'b1) ? { 2'b11, v } : { 2'b00, v };
@@ -36,6 +39,7 @@ package RVCExpand;
     return (c[12] == 1'b1) ? { 4'hF, mid, 1'b0 } : { 4'h0, mid, 1'b0 };
   endfunction
 
+  // Quadrant 1 ALU group (C.SRLI/SRAI/ANDI/SUB/XOR/OR/AND)
   function Instruction expandMiscAlu(Bit#(16) c);
     Bit#(5) rs1P = rvcReg(c[9:7]);   // rd' / rs1'
     Bit#(5) rs2P = rvcReg(c[4:2]);   // rs2'
@@ -55,6 +59,7 @@ package RVCExpand;
     endcase);
   endfunction
 
+  // Quadrant 2 register ops (C.MV/JR/ADD/JALR)
   function Instruction expandCR(Bit#(16) c);
     Bit#(5) rdF  = c[11:7];
     Bit#(5) rs2F = c[6:2];
@@ -67,6 +72,7 @@ package RVCExpand;
     endcase);
   endfunction
 
+  // Expand a 16-bit compressed instruction to its 32-bit equivalent
   function Instruction expandRVC(Bit#(16) c);
     Bit#(5)  rdF  = c[11:7];
     Bit#(5)  rs2F = c[6:2];
@@ -108,6 +114,7 @@ package RVCExpand;
     endcase);
   endfunction
 
+  // Low two bits != 11 means a 16-bit instruction
   function Bool isCompressedParcel(Bit#(16) parcel) = (parcel[1:0] != 2'b11);
 
   typedef struct {
@@ -118,6 +125,7 @@ package RVCExpand;
     Bit#(32) jalImm;
   } PreDec deriving (Bits, Eq, FShow);
 
+  // Cheap control-flow classification (jal/jalr/branch/serializing) for the fetch stage
   function PreDec predecodeCF(Bit#(16) parcel, Bit#(16) hi);
     Bit#(32) raw = { hi, parcel };
     Bit#(5)  key = { parcel[1:0], parcel[15:13] };

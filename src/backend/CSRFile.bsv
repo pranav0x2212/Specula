@@ -3,6 +3,7 @@ package CSRFile;
   import Common::*;
 
   // ---- CSR addresses actually touched by xv6 _entry/start
+  // CSR addresses (M-mode then S-mode)
   Bit#(12) csrMstatus  = 12'h300;
   Bit#(12) csrMedeleg  = 12'h302;
   Bit#(12) csrMideleg  = 12'h303;
@@ -22,6 +23,7 @@ package CSRFile;
   Bit#(12) csrStval    = 12'h143;
   Bit#(12) csrSip      = 12'h144;
 
+  // Status register bit positions
   Integer mstatusMIE  = 3;    // MIE
   Integer mstatusMPIE = 7;    // MPIE
   Integer sstatusSIEb  = 1;   // SIE
@@ -29,6 +31,7 @@ package CSRFile;
   Integer sstatusSPPb  = 8;   // SPP  (1 = S, 0 = U)
   Integer sieSEIEb     = 9;   // supervisor external interrupt enable
 
+  // Privilege levels
   Bit#(2) privU = 2'b00;
   Bit#(2) privS = 2'b01;
   Bit#(2) privM = 2'b11;
@@ -43,6 +46,7 @@ package CSRFile;
     Bit#(2)  nextPriv;
   } SretResult deriving (Bits, FShow);
 
+  // Compute the new CSR value for CSRRW/CSRRS/CSRRC
   function Bit#(32) csrNewValue(Bit#(3) funct3, Bit#(32) oldv, Bit#(32) src);
     return (case (funct3[1:0])
               2'b01:   src;                 // CSRRW / CSRRWI
@@ -52,6 +56,7 @@ package CSRFile;
             endcase);
   endfunction
 
+  // CSRRS/CSRRC with rs1=x0 (or zimm 0) must not write
   function Bool csrWriteEnabled(Bit#(3) funct3, Bit#(5) rs1OrZimm);
     return (funct3[1:0] == 2'b01) || (rs1OrZimm != 0);
   endfunction
@@ -59,9 +64,12 @@ package CSRFile;
   interface CSRFile_IFC;
     method Bit#(32) csrRead (Bit#(12) addr);
     method Action   csrWrite(Bit#(12) addr, Bit#(32) value);
+    // MRET: restore MIE from MPIE, return to mepc at privilege MPP
     method ActionValue#(MretResult) doMret();
+    // Trap into S-mode: save cause/epc/tval, push the SIE->SPIE stack, return the stvec target
     method ActionValue#(Bit#(32)) takeTrap(Bit#(1) isInterrupt, Bit#(6) cause,
                                            Bit#(32) epc, Bit#(32) tval, Bit#(2) fromPriv);
+    // SRET: restore SIE from SPIE, return to sepc at privilege SPP
     method ActionValue#(SretResult) doSret();
     method Bool sstatusSIE();
     method Bool sieSEIE();
@@ -70,6 +78,7 @@ package CSRFile;
     method Bit#(32) satpValue();
   endinterface
 
+  // Subset of M/S CSRs needed to boot xv6 (no counters, no timer)
   module mkCSRFile(CSRFile_IFC);
 
     Reg#(Bit#(32)) mstatus  <- mkReg(0);

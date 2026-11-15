@@ -1,3 +1,4 @@
+// Simple 5-stage in-order pipeline kept as a baseline / comparison to the OoO core
 package InOrderCore;
 
   import Vector::*;
@@ -22,6 +23,7 @@ package InOrderCore;
     Instruction raw;
   } Decoded deriving (Bits, FShow);
 
+  // Tiny hard-coded instruction ROM
   function Bit#(32) getInstruction(Bit#(32) pc);
     case (pc)
       0: return 32'h00500113; // addi x2, x0, 5
@@ -75,6 +77,7 @@ package InOrderCore;
     return mem;
   endmodule
 
+  // IF > ID > EX > MEM > WB with a register file and small RAM
   module mkInOrderCore(Empty);
     Reg#(Bit#(32)) pc <- mkReg(0);
     Reg#(Bit#(3)) initState <- mkReg(0);
@@ -91,6 +94,7 @@ package InOrderCore;
     Reg#(Tuple4#(Bit#(32), RegIndex, Bool, Bit#(32))) ex_mem <- mkReg(?);
     Reg#(Bool) id_ex_valid <- mkReg(False);
 
+    // Preload a few registers with test values
     rule init1(initState == 0);
       rf.upd(1, 10); // x1 = 10 
       initState <= 1;

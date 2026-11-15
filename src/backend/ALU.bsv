@@ -9,6 +9,7 @@ package ALU;
     return pack(shifted);
   endfunction
 
+  // Request into the ALU
   typedef struct {
     ALUOp opcode;
     Data a;
@@ -39,16 +40,20 @@ package ALU;
     method Action enq(ALUReq r);
     method ActionValue#(ALUResp) deq();
     method Action flush();  
+    // Anything still in flight (used to know recovery is complete)
     method Bool busy();      
   endinterface
 
+  // Divider state: idle, iterating, result ready
   typedef enum { DIV_IDLE, DIV_RUN, DIV_DONE } DivState deriving (Bits, Eq, FShow);
 
+  // Integer ALU with branch resolution, a 1-cycle-latency multiplier and a 32-cycle divider
   module mkALU(ALU_IFC);
 
     FIFOF#(ALUReq) reqQ <- mkFIFOF();  // Input buffer
     FIFOF#(ALUResp) respQ <- mkFIFOF();  // Output buffer
 
+    // Flush request: clears queues and cancels any mul/div at the next cycle
     Array#(Reg#(Bool)) flushReq <- mkCReg(2, False);
 
     Reg#(DivState)  divSt     <- mkReg(DIV_IDLE);
@@ -67,6 +72,7 @@ package ALU;
 
     function Bool isDivOp(ALUOp op) = (op == ALU_DIVU) || (op == ALU_REMU);
 
+    // Apply the flush
     rule finishFlush (flushReq[0]);
       reqQ.clear;
       respQ.clear;
@@ -76,6 +82,7 @@ package ALU;
       if (traceOn) $display("[ALU] flushed in-flight requests/results");
     endrule
 
+    // Restoring division: one quotient bit per cycle
     rule divStep (!flushReq[0] && divSt == DIV_RUN);
       Bit#(33) shifted = { divRem, divQuot[31] };
       Bit#(33) diff    = shifted - { 1'b0, divDsor };
@@ -86,6 +93,7 @@ package ALU;
       if (divCount == 1) divSt <= DIV_DONE;
     endrule
 
+    // Emit the divider result (RISC-V: x/0 = all ones, x%0 = x)
     rule divDrain (!flushReq[0] && divSt == DIV_DONE);
       Bit#(32) q   = divByZero ? 32'hFFFFFFFF : divQuot;
       Bit#(32) rem = divByZero ? divDvnd      : divRem;
@@ -107,6 +115,7 @@ package ALU;
                divReq.robTag.idx, divIsRem ? "REMU" : "DIVU", res);
     endrule
 
+    // Emit the multiplier result
     rule mulDrain (!flushReq[0] && mulPending);
       let r = mulReq;
       ALUResp out = ALUResp {
@@ -126,6 +135,7 @@ package ALU;
       if (traceOn) $display("[ALU] mul drain: rob=%0d res=%h", r.robTag.idx, mulResult);
     endrule
 
+    // Take one request: start mul/div, or compute a single-cycle result
     rule execute (!flushReq[0] && divSt == DIV_IDLE && !mulPending);
       let r = reqQ.first;
 
@@ -160,6 +170,7 @@ package ALU;
       Bool actualTaken = False;
       Data actualTarget = 32'd0;
 
+      // Single-cycle ops; branches/jumps also compute the actual outcome and target
       case (r.opcode)
         ALU_ADD: res = r.a + r.b;
         ALU_SUB: res = r.a - r.b;
@@ -179,6 +190,7 @@ package ALU;
           actualTarget = r.pc + r.branchOffset;
           res = r.fallPC;
         end
+        // JALR target has bit 0 cleared; result is the link address
         ALU_JALR: begin
           isBranch = True; isJump = True; isJalr = True; actualTaken = True;
           actualTarget = (r.a + r.branchOffset) & 32'hFFFFFFFE;

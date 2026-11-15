@@ -1,5 +1,6 @@
 package Common;
 
+  // Compile-time switch for verbose $display tracing
   Bool traceOn = False;
 `ifdef INTERACTIVE_UART
   Bool interactiveMode = True;
@@ -7,12 +8,14 @@ package Common;
   Bool interactiveMode = False;
 `endif
 
+  // Basic type aliases
   typedef Bit#(5) RegIndex;
   typedef Bit#(32) Instruction;
   typedef Bit#(32) Data;
   typedef Bit#(32) Addr;
   typedef Maybe#(ROBTag) RATEntry;
 
+  // FetchSlice: one fetched instruction with fault info and control-flow predecode
   typedef struct {
     Instruction instr;
     Bit#(32)    npc;
@@ -26,11 +29,13 @@ package Common;
     Bit#(32)    pdJalImm;
   } FetchSlice deriving (Bits, FShow);
 
+  // Opcode: RISC-V major opcode groups
   typedef enum {
     OP_IMM, OP, LUI, AUIPC, JAL, JALR, BRANCH, LOAD, STORE, MISC_MEM, SYSTEM, INVALID
   } Opcode deriving (Bits, Eq, FShow);
 
   typedef enum {
+    // ALUOp: internal micro-op set used after decode
     ALU_ADD, ALU_SUB, ALU_AND, ALU_OR,
     ALU_BEQ, ALU_BNE, ALU_BLT, ALU_BGE,
     ALU_LW, ALU_SW,
@@ -72,6 +77,7 @@ package Common;
     Bit#(4)  faultCause;
   } RenamedInstr deriving (Bits, FShow);
 
+  // Physical register file size
   typedef 6 LogNumPhysRegs;
   typedef 64 NUM_PHYS_REGS;
   typedef Bit#(LogNumPhysRegs) PhysRegTag;
@@ -81,7 +87,9 @@ package Common;
     return 0;
   endfunction
 
+  // Decode a 32-bit instruction into micro-op, registers and immediate
   function Decoded decode(Instruction instr, Bit#(32) pc);
+    // Pick the micro-op from opcode/funct3/funct7
     Bit#(7) actualOpcode = instr[6:0];
     Bit#(3) funct3 = instr[14:12];
 
@@ -154,6 +162,7 @@ package Common;
       aluOp = ALU_ADD;
     end
     
+    // Build the immediate (I/S/B/U/J formats) and the rs2 field
     Bit#(32) imm = 0;
     RegIndex rs2Field = 0;
     
@@ -197,6 +206,7 @@ package Common;
       rs2Field = instr[24:20];  // R-type and other types use rs2
     end
 
+    // Branches and stores have no rd; LUI/AUIPC/JAL/FENCE ignore rs1
     RegIndex rdField = (actualOpcode == 7'b1100011) ? 0 : instr[11:7];
 
     RegIndex rs1Field = ((actualOpcode == 7'b1101111) || (actualOpcode == 7'b0110111)
@@ -215,6 +225,7 @@ package Common;
     };
   endfunction
 
+  // Sign extend 12-bit immediate (for I-type)
   function Bit#(32) signExtend(Bit#(12) imm12);
     Bit#(32) extended;
     if (imm12[11] == 1)
@@ -261,6 +272,7 @@ package Common;
     return sa >= sb;
   endfunction
 
+  // Op classification helpers
   function Bool isMemoryOp(ALUOp op);
     return (op == ALU_LW || op == ALU_SW || op == ALU_AMOSWAP);
   endfunction
@@ -299,6 +311,7 @@ package Common;
     return (op == ALU_ECALL);
   endfunction
 
+  // Serializing ops freeze fetch and execute at commit
   function Bool isSerializingOp(ALUOp op);
     return (op == ALU_CSR) || (op == ALU_MRET) || (op == ALU_SRET) || (op == ALU_ECALL);
   endfunction
@@ -321,6 +334,7 @@ package Common;
     return (op == ALU_SW);
   endfunction
 
+  // Needs a new physical register (rd != x0, not a store)
   function Bool needsPhysDest(Decoded d);
     return (d.rd != 0) && (d.opcode != ALU_SW);
   endfunction
@@ -329,6 +343,7 @@ package Common;
     UInt#(5) idx;
   } ROBTag deriving (Bits, FShow);
 
+  // Store-queue pointer: 3-bit slot + 1 wrap bit
   typedef Bit#(4) SQPtr;
 
   typedef struct {

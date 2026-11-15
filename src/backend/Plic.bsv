@@ -19,6 +19,7 @@ package Plic;
     method Bool     extReq();
   endinterface
 
+  // Minimal PLIC for hart 0 S-mode: VirtIO (src 1) and UART RX (src 10)
   module mkPlic#(function Bool uartRx)(Plic_IFC);
     Reg#(Bit#(32)) prio1   <- mkReg(0);
     Reg#(Bit#(32)) prio10  <- mkReg(0);
@@ -28,13 +29,16 @@ package Plic;
 
     Reg#(Bit#(16)) virtioDone <- mkReg(0);
     Reg#(Bit#(16)) virtioAck  <- mkReg(0);
+    // VirtIO IRQ is a level: raised by each completion, dropped when the driver claims it
     Bool virtioLevel = (virtioDone != virtioAck);
 
+    // Source is live if pending/level, enabled, and above the threshold
     function Bool active(Integer src, Bit#(32) prio, Bool lvl);
       Bit#(32) b = 32'b1 << src;
       return (((pending & b) != 0) || lvl) && ((senable & b) != 0) && (prio > sthresh);
     endfunction
 
+    // Highest-priority live source (VirtIO wins over UART); 0 = none
     function Bit#(32) claimId();
       return active(irqVirtio, prio1,  virtioLevel) ? fromInteger(irqVirtio) :
              active(irqUart,   prio10, uartRx)      ? fromInteger(irqUart)   :
@@ -57,6 +61,7 @@ package Plic;
       else if (off == offPrio10)  prio10  <= data;
       else if (off == offSEnable) senable <= data;
       else if (off == offSThresh) sthresh <= data;
+      // Writing the claim register completes the interrupt
       else if (off == offSClaim) begin
         if (data[4:0] == fromInteger(irqVirtio)) virtioAck <= virtioAck + 1;
         else                                     pending   <= pending & ~(32'b1 << data[4:0]);
@@ -64,6 +69,7 @@ package Plic;
       else noAction;
     endmethod
 
+    // Called by VirtIO when a request finishes
     method Action setPending(Bit#(5) src);
       virtioDone <= virtioDone + 1;
     endmethod

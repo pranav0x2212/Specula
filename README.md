@@ -10,7 +10,7 @@ has not been placed, routed or run on an FPGA.
 
 ## Architecture
 
-![Specula architecture](docs/architecture.svg)
+![Specula architecture](docs/architecture_overview.svg)
 
 Specula fetches, decodes, renames, dispatches, issues, executes and commits one
 instruction per cycle. Fetch is steered by a gshare predictor (64-entry 2-bit
